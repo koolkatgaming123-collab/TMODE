@@ -1,0 +1,57 @@
+TOURNEY MODE SIGNED UPDATE PUBLISHING
+
+Consumer installations need only the EXE. No GitHub account, cloud account,
+API key or signing key belongs on a player's PC. Startup can check the small
+signed manifest; download and restart require an explicit user action.
+The updater never switches versions during Fortnite or a pending Mode session.
+
+Public stable manifest:
+https://github.com/koolkatgaming123-collab/TMODE/releases/latest/download/tmode-update.json
+
+Release assets are TMODE.exe, the optional portable ZIP, and tmode-update.json.
+The manifest signs exact UTF-8 JSON payload bytes using RSA-SHA256 PKCS#1 v1.5.
+Its public verification key is compiled into the app. HTTPS, release signature,
+product/channel, schema, x64 architecture, Windows minimum, numeric version,
+size, binary metadata and SHA-256 are checked before an executable is staged.
+Every redirect must remain on an allowed HTTPS GitHub asset host.
+
+Publisher contract (PowerShell 7+):
+./release/New-TModeManifest.ps1 -ExecutablePath <TMODE.exe> -Version 1.7.0 `
+  -DownloadUrl https://github.com/koolkatgaming123-collab/TMODE/releases/download/v1.7.0/TMODE.exe `
+  -PrivateKeyPath <external-private-key.pem> -OutputPath <tmode-update.json> `
+  -Notes 'Release notes'
+
+Optional parameters: -Product TourneyMode -Channel stable
+                     -MinOsVersion 10.0.19041
+
+The executable ProductVersion must match -Version and its PE machine must be
+x64. Only public keys, scripts and workflows may be checked into the repository.
+The private RSA key is supplied from an encrypted Actions secret or an external
+local file. Never commit it, paste it into command arguments, print it, include
+it in a portable ZIP or upload it as a release asset. Do not reuse a production
+signing key in fixture tests. Consumer apps do not need that key or a token.
+
+The .github/workflows/release.yml tag workflow builds/tests the EXE, signs its manifest and publishes all
+three public assets. Keep the compiled public key unchanged across these
+updates. Rotating trust requires a separately reviewed key transition; changing
+the server's key alone must fail closed. Manifest signatures do not replace
+Windows Authenticode signing or establish that a performance claim is measured.
+
+Before publication the workflow runs Test-TModeManifest.ps1 against the public
+key pinned in AppUpdateConfiguration.cs and the exact selected executable.
+A wrong signing secret, payload/hash/version mismatch or invalid signature
+stops publication. The runtime is pinned to10.0.14 with its exact license texts;
+review runtime/security updates and refresh those texts in subsequent releases.
+
+Apply uses a copy of the same running EXE in the user's local update cache.
+The helper validates a DPAPI-protected ticket belonging to that Windows user,
+binds the exact parent PID/start time/path and old executable hash, and requires
+a ready/go handshake while the parent is alive. It waits for normal parent exit
+with a deadline and never kills a process. It rechecks the game/recovery journal,
+signature, version and hashes before a same-volume atomic replacement. A backup
+is retained next to the original EXE. Immediate startup/verification failure
+attempts rollback; a running app or unsafe recovery state prevents a blind swap.
+The helper writes result.json in its owned cache directory for diagnosis.
+
+No fixture test launches the apply helper, replaces a live app, restarts Mode,
+changes game/network settings or contacts the production feed.

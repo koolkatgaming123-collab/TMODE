@@ -1,0 +1,29 @@
+TMODE THIRD-PARTY NOTICES
+
+Microsoft .NET 10 self-contained runtime
+https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
+https://github.com/dotnet/runtime/blob/main/THIRD-PARTY-NOTICES.TXT
+Microsoft Windows Desktop runtime
+https://github.com/dotnet/wpf/blob/main/LICENSE.TXT
+https://github.com/dotnet/winforms/blob/main/LICENSE.TXT
+
+Exact .NET 10.0.14 runtime/Desktop license and runtime third-party texts are
+embedded in the EXE (Updates -> Third-party licenses) and included in ThirdParty/.
+
+Optional Intel PresentMon 2.6.0
+https://github.com/GameTechDev/PresentMon/releases/tag/v2.6.0
+Bundled helper SHA256:
+B2A706BC6AD475749E3B7E3409263AA1E6906D45BDCF993F6DBC0F660188F1AF
+Its MIT license is provided in Tools/PresentMon-LICENSE.txt.
+PresentMon is optional; optimization and CSV import do not require it.
+
+O&O ShutUp10++ is an external, separately acquired O&O Software product.
+No O&O executable/configuration preset is bundled, redistributed or silently
+invoked. Its own license and interface govern user actions in that tool.
+https://www.oo-software.com/en/shutup10
+https://www.oo-software.com/en/shutup10/eula
+
+Fortnite, Epic, NVIDIA, Intel, AMD, Microsoft, ASUS and other vendor names are
+used to identify compatibility or link guidance. This project does not imply
+endorsement by those vendors. Primary technical references appear in the
+Guide / BIOS page and docs/OPTIMIZATION-RESEARCH.txt.

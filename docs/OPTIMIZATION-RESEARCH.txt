@@ -1,0 +1,131 @@
+TM170-DEEP-RESEARCH — 2026-11-02
+Owner: /root/network_service_audit_120
+
+DELIVERY
+OptimizationGuide.Build(PcAnalysis) returns 27 base items, optionally one CPU-family
+item and one item per detected NVIDIA/Radeon vendor (maximum 30). Each supplies:
+Area, Title, Detected, Recommendation, Why, Tradeoff, NeedsRestart,
+RequiresManualAction, Confidence and SourceUrls. Recommendation starts with an
+explicit Supported / Optional A/B / Manual / Avoid blind defaults / Experimental,
+off by default verdict. All require manual action; none is an execution grant.
+The builder performs no I/O, probes, commands, downloads, edits or benchmarking.
+
+PRIORITIES
+The endgame objective is sustainable frame budgets and fewer slow frames, not
+the highest unloaded average or lowest process count. Example arithmetic only:
+240 FPS has a 4.17 ms budget. A 10 ms simulation spike is not fixed by the GPU
+finishing in 2 ms. CPU work, GPU queueing, compilation/asset stalls, memory
+pressure, thermals and network queues need different diagnosis.
+1. Stability/firmware and required CPU provisioning before aggressive clocks.
+2. Establish the actual constraint using representative, warmed data.
+3. Compare native latency controls, sustainable cap and intended display path.
+4. Reduce measured competing work while preserving dependencies.
+5. Retain repeatable improvements with an exact recovery path.
+
+DETECTION LIMITS
+Known inputs: CPU name/cores/threads, GPU/driver strings, RAM capacity/reported
+speed, board/model/BIOS date, AC/portable status, refresh, pagefile preference,
+commit, current plan, Game Mode/capture/HAGS registry preferences, free space,
+and a short background-app sample.
+Explicitly unknown: microcode and Intel Defaults; active memory profile/channels/
+timings/stability; temperatures/effective clocks/throttle reasons; active ReBAR;
+Secure Boot/TPM/encryption; VRR range; renderer/presentation; shader health;
+router SQM; loaded RTT/loss; current NIC values; active HAGS support; combat
+bottleneck/latency. Registry preference is not active capability.
+
+CPU/BIOS FINDINGS
+Intel's current instability KB recommends relevant Intel Default Settings plus
+latest OEM BIOS with 0x12F OR LATER for 13th/14th-gen desktop processors.
+The 14900KF's 125 W base / 253 W max turbo specifications are SKU facts, not a
+universal current/PL recipe. A BIOS date does not prove microcode. A flash must
+not be claimed to repair an already degraded processor.
+https://www.intel.com/content/www/us/en/support/articles/000102331/processors.html
+https://www.intel.com/content/www/us/en/products/sku/236787/intel-core-i9-processor-14900kf-36m-cache-up-to-6-00-ghz/specifications.html
+
+AMD provisioning/V-Cache optimizer are dependencies, not bloat. Exact conventional
+7900X3D/7950X3D/9900X3D/9950X3D names are distinguished from unknown topology.
+The newer 9950X3D2 Dual Edition has V-Cache on both CCDs: matching any Ryzen 9 X3D
+to a copied asymmetric mask is wrong. The historical vendor 7000X3D setup article
+describes Game Mode/Game Bar dependencies but its direct URL now redirects.
+Current chipset notes independently confirm optimizer/provisioning components;
+the guide does not assert identical old requirements for every newer CPU.
+https://www.amd.com/en/resources/support-articles/release-notes/RN-RYZEN-CHIPSET-8-09-28-1124.html
+https://www.amd.com/en/products/processors/technologies/3d-v-cache.html
+https://www.amd.com/en/products/processors/desktops/ryzen/9000-series/amd-ryzen-9-9950x3d2-dual-edition.html
+https://community.amd.com/t5/gaming/how-to-set-up-your-system-with-a-new-amd-ryzen-9-7950x3d-or/ba-p/589464
+
+XMP/EXPO and Curve Optimizer are per-system manual stability experiments. No
+universal timing/voltage/negative offset, E-core/SMT disable or unlimited-power
+default is proposed. ReBAR needs compatible firmware/GPU/driver and readback;
+Above 4G alone is insufficient. Preserve boot, keys, TPM/Secure Boot and
+thermal/current protection. The guide carries exact vendor/OEM links per item.
+
+GPU/WINDOWS FINDINGS
+Native Reflex and driver queue controls are not independent additive boosts.
+Boost costs power; Anti-Lag 2 needs supported game integration. HAGS needs an
+optional driver-specific reboot A/B. Windowed optimizations target compatible
+DX10/DX11 paths, not an already-DX12 renderer.
+Epic's April 2026 guide describes current Performance mode as DX12-based.
+Its generic unlimited-FPS advice is not proof against NVIDIA's conditional
+GPU-bound/VRR cap guidance. Cap choice depends on scene and tearing preference.
+Epic acknowledges Pre-download Streamed Assets is missing; do not force stale
+hidden options. Healthy shader caches are retained; diagnosed recompilation
+loops have a separate targeted repair and warm-up path.
+https://store.epicgames.com/news/fortnite-on-pc-best-settings-for-competitive-play-in-2026
+https://www.epicgames.com/help/c-34254770/c-38015632/perche-non-trovo-l-opzione-pre-download-delle-risorse-in-streaming-per-fortnite-a10987768
+https://www.epicgames.com/help/c-34254770/c-38015632/a11302262
+https://nvidia.custhelp.com/app/answers/detail/a_id/4958/
+https://devblogs.microsoft.com/directx/hardware-accelerated-gpu-scheduling/
+https://support.microsoft.com/en-au/windows/hardware/display-graphics/optimizations-for-windowed-games-in-windows-11
+
+ONLY THREE ROOT-OWNED EXPERIMENTS
+All explicitly Experimental, OFF by default, and no measured gain claimed:
+- Existing physical-wired NIC backend: fresh route, supported/exposed binary
+  EEE/moderation/RSS values, exact originals, restore/readback. Lower batching
+  can reduce packet delay while raising interrupts/CPU and hurting endgame tails.
+- Existing app-scoped DSCP46 backend: known Fortnite identity, supported route,
+  policy ownership and recovery. Marking requests a class; it is not reserved
+  Internet bandwidth. Router/ISP handling and voice/EF policy can negate it.
+- Existing measured-known-app BelowNormal governor: retain original priorities;
+  no system/security/input/audio/anti-cheat/chipset changes or app shutdown.
+  Background responsiveness/backlogs can worsen; memory/I/O costs remain.
+Microsoft NIC material is mostly server context: mechanism/tradeoff evidence,
+never a wholesale consumer Fortnite preset. Root owns actual capability guards.
+
+POPULAR PROJECT COMPARISON — NO SCRIPTS/CONFIGS COPIED
+CTT WinUtil's service-host consolidation description targets <=12 GB low-end
+systems and warns of Xbox interference. Microsoft explains split hosts'
+isolation/reliability/accounting benefits. Verdict: fewer hosts is not itself
+a reason to sacrifice them on a high-memory gaming PC.
+https://winutil.christitus.com/code-reference/tweaks/z--advanced-tweaks---caution/svchostsplitting/
+https://learn.microsoft.com/en-us/windows/application-management/svchost-service-refactoring
+
+Atlas documents forced-C0 heat/power and configuration/security tradeoffs,
+including newer-CPU and anti-cheat issues. Copied defaults can conflict with
+thermal headroom and model-specific scheduling. Treat HVCI/VBS/mitigations
+as security decisions, not hidden automatic frame-time repairs.
+https://docs.atlasos.net/post-install/atlas-folder/configuration/
+https://docs.atlasos.net/post-install/atlas-folder/security/
+
+ReviOS documents laptop overheating associated with its hibernation-disable
+default; its feature inventory includes broad removals. Preserve working sleep,
+recovery/servicing and dependencies. Disk/component reductions are not FPS data.
+https://revi.cc/docs/faq/troubleshoot/overheating
+https://revi.cc/docs/features
+
+O&O is covered separately in OOS-RESEARCH.md; privacy advice is not an FPS result.
+
+SOURCE ACCESS QUALIFICATIONS
+The English Epic missing-assets URL did not render through the web reader; its
+primary-domain indexed page and localized vendor result confirmed the notice.
+RFC3246 returned HTTP429; Microsoft QoS documentation independently confirms
+app scoping, DSCP/router classification and the EF46 voice example.
+The historical AMD guide redirect is explicitly disclosed above.
+All other detailed references are attached directly to the corresponding item.
+
+VALIDATION / NEXT OWNER
+Primary-source applicability and source API reviewed. Native PowerShell confirmed
+the new motherboard fields exist and the intended guide item families are present.
+This child did not compile/run shared tests, change settings, contact PC2,
+activate Mode or benchmark. Root owns shared compilation, pure unknown/Intel/
+X3D/mixed-GPU guide checks and UI review. No local performance gain is asserted.

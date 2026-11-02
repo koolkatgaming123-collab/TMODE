@@ -1,0 +1,67 @@
+name: Publish T Mode
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.403'
+      - name: Stage pinned optional frame-capture helper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path Tools -Force | Out-Null
+          Invoke-WebRequest 'https://github.com/GameTechDev/PresentMon/releases/download/v2.6.0/PresentMon-2.6.0-x64.exe' -OutFile Tools/PresentMon.exe
+          if ((Get-FileHash Tools/PresentMon.exe).Hash -ne 'B2A706BC6AD475749E3B7E3409263AA1E6906D45BDCF993F6DBC0F660188F1AF') { throw 'Unexpected diagnostics helper hash.' }
+      - name: Verify version and build portable app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [xml]$project = Get-Content TourneyMode.csproj
+          $version = [string]$project.Project.PropertyGroup.Version
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag must match the project version.' }
+          "TMODE_VERSION=$version" >> $env:GITHUB_ENV
+          dotnet publish TourneyMode.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o release-build
+          if ($LASTEXITCODE) { throw 'Publish failed.' }
+          Copy-Item README.txt,VALIDATION.txt,THIRD-PARTY-NOTICES.txt,install.ps1 -Destination release-build
+      - name: Isolated regression checks
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath '.\release-build\Tourney Mode.exe' -ArgumentList @('--self-test', "$env:RUNNER_TEMP\tmode-self-tests.txt") -WindowStyle Hidden -Wait -PassThru
+          Get-Content "$env:RUNNER_TEMP\tmode-self-tests.txt"
+          if ($p.ExitCode) { throw 'Regression checks failed.' }
+      - name: Build signed update manifest
+        shell: pwsh
+        env:
+          TMODE_UPDATE_PRIVATE_KEY: ${{ secrets.TMODE_UPDATE_PRIVATE_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!$env:TMODE_UPDATE_PRIVATE_KEY) { throw 'The publisher signing secret is missing.' }
+          New-Item -ItemType Directory -Path publish -Force | Out-Null
+          Copy-Item '.\release-build\Tourney Mode.exe' '.\publish\TMODE.exe'
+          Copy-Item README.txt '.\publish\README.txt'
+          $key = Join-Path $env:RUNNER_TEMP ('tmode-key-' + [guid]::NewGuid().ToString('N') + '.pem')
+          try {
+            [IO.File]::WriteAllText($key, $env:TMODE_UPDATE_PRIVATE_KEY)
+            & .\release\New-TModeManifest.ps1 -ExecutablePath '.\publish\TMODE.exe' -Version $env:TMODE_VERSION -DownloadUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:TMODE_VERSION/TMODE.exe" -PrivateKeyPath $key -OutputPath '.\publish\tmode-update.json' -Notes "T Mode $env:TMODE_VERSION. See the release notes for changes."
+          } finally { if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Force } }
+          & .\release\Test-TModeManifest.ps1 -ExecutablePath '.\publish\TMODE.exe' -ManifestPath '.\publish\tmode-update.json'
+          Compress-Archive -Path '.\release-build\*' -DestinationPath ".\publish\TMODE-$env:TMODE_VERSION-win-x64.zip"
+      - name: Publish verified assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v$env:TMODE_VERSION"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) { Write-Output 'The immutable release already exists; its published assets will not be replaced.'; exit 0 }
+          $notes = "release/NOTES-$env:TMODE_VERSION.md"
+          $noteArgs = if (Test-Path -LiteralPath $notes) { @('--notes-file', $notes) } else { @('--generate-notes') }
+          gh release create $tag publish/TMODE.exe publish/tmode-update.json "publish/TMODE-$env:TMODE_VERSION-win-x64.zip" --repo $env:GITHUB_REPOSITORY --title "T Mode $env:TMODE_VERSION" @noteArgs --verify-tag
+          if ($LASTEXITCODE) { throw 'Release publication failed.' }
