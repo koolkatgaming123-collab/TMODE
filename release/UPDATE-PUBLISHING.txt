@@ -2,7 +2,8 @@ TOURNEY MODE SIGNED UPDATE PUBLISHING
 
 Consumer installations need only the EXE. No GitHub account, cloud account,
 API key or signing key belongs on a player's PC. Startup can check the small
-signed manifest; download and restart require an explicit user action.
+signed manifest, automatically download and install a newer signed release,
+then reopen the same EXE. The Updates page also supports manual retry.
 The updater never switches versions during Fortnite or a pending Mode session.
 
 Public stable manifest:
@@ -16,8 +17,8 @@ size, binary metadata and SHA-256 are checked before an executable is staged.
 Every redirect must remain on an allowed HTTPS GitHub asset host.
 
 Publisher contract (PowerShell 7+):
-./release/New-TModeManifest.ps1 -ExecutablePath <TMODE.exe> -Version 1.7.0 `
-  -DownloadUrl https://github.com/koolkatgaming123-collab/TMODE/releases/download/v1.7.0/TMODE.exe `
+./release/New-TModeManifest.ps1 -ExecutablePath <TMODE.exe> -Version 1.7.1 `
+  -DownloadUrl https://github.com/koolkatgaming123-collab/TMODE/releases/download/v1.7.1/TMODE.exe `
   -PrivateKeyPath <external-private-key.pem> -OutputPath <tmode-update.json> `
   -Notes 'Release notes'
 
@@ -52,6 +53,12 @@ signature, version and hashes before a same-volume atomic replacement. A backup
 is retained next to the original EXE. Immediate startup/verification failure
 attempts rollback; a running app or unsafe recovery state prevents a blind swap.
 The helper writes result.json in its owned cache directory for diagnosis.
+Automatic attempts record the signed target version/hash before helper launch.
+The same target is not retried automatically after failure or rollback; a newer
+target or explicit manual retry is required. Every helper relaunch passes
+--skip-startup-update-once so a newly launched copy does not nest another update
+inside its parent's startup observation. Existing1.7.0 installations require
+one confirmed update before they acquire1.7.1 automatic installation behavior.
 
 No fixture test launches the apply helper, replaces a live app, restarts Mode,
 changes game/network settings or contacts the production feed.

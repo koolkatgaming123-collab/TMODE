@@ -1,57 +1,50 @@
-TMODE 1.7.0 - VERIFICATION RECORD (2026-11-02)
+TMODE 1.7.1 - VERIFICATION RECORD
 
-Local self-contained win-x64 release publish succeeded with .NET SDK10.0.403,
-bundled .NET / Windows Desktop10.0.14 and no compiler warnings. Final source
-corrects the default Strip status wording to avoid a false no-changes claim
-during recovery; the exact delivery EXE passed the274-check suite again.
+Self-contained Windows x64 publish succeeded with .NET SDK10.0.403,
+bundled .NET/Windows Desktop10.0.14 and no compiler warnings.
 
-274 isolated checks passed, 0 failed, with installed .NET lookup disabled.
-The suite covers process protection/identity, restore transactions, planner
-staleness, Fortnite INI conflicts, priority/governor protections, strict verified
-checkpoint ordering, mixed Windows-profile/Strip repair and interrupted recovery,
-signed updater validation, hardware-specific advice, Internet scoring and A/B/A
-rollback. Four real hidden PowerShell plumbing checks used ONLY inert scripts
-and separate GUID-scoped fixture mutexes: long stdin, busy helper exclusion,
-timeout cleanup and production-name rejection. They ran no NIC command/probe.
-Exact redistribution license resources were also verified inside the EXE.
+316 isolated regression checks passed on the final functional candidate.
+Coverage includes18 automatic-startup coordinator cases,12 stop-mode cases,
+verified-original restart recovery and seven final-authorization groups.
+The helper receives no GO during preparation: only the owner-bound, unexpired,
+identity-verified synchronous commit can authorize exit and replacement.
+Cancellation, wrong owner, stale identities, unsafe game/journal/busy state,
+duplicate authorization and disposal keep the current executable in place.
+Tests use fake update/process/settings systems and inert helper scripts only.
+No real update helper replacement or existing application restart was run.
 
-108 hidden synthetic UI checks passed, 0 failed, across40 renders. Header and
-Updates button bounds, consent/recovery states and license reader were reviewed.
-One final status-wording correction was compiled afterward; layout is unchanged.
-Hidden native owner-drawn ComboBox callbacks can be unavailable; shared drawing
-fallback is explicitly identified and does not claim a live interaction test.
+113 hidden UI checks passed,0failed, across42 synthetic renders, including
+Cancel start during busy preparation and OFF/RECOVERY with retained originals.
+The final update subtitle was corrected afterward; its layout is unchanged.
+Native hidden owner-drawn ComboBox callbacks can be unavailable; the shared
+preview drawing fallback is explicitly recorded and is not a live interaction.
 
-Read-only final Tweak preview on the actual PC succeeded. It detected the CPU,
-board and Windows-visible topology, preserved unknown/read-only game settings,
-and offered one eligible Windows preference group. No approval/apply was invoked;
-no live session journal was created.
+Exact delivery EXE SHA256:
+38996C2D25676FDCD2A90EFC13685B60CC2FB1F414A080E345298FC54D47BE1C
 
-Local signed release candidate:
-TMODE.exe SHA256 D71D75360164F6802179E6A46ECBBCA8D76A42C4F8EEDBF1FDD5D3AD06449DA6
-Its manifest signature was verified against the key pinned in the source, and
-payload version, size and SHA256 were compared to the executable. Future CI
-builds can have different hashes; each manifest must describe its exact asset.
+Stop defects reproduced in synthetic systems: OFF during reviewed analysis,
+canceled work before background dispatch, queued activation during recovery,
+and stop boundaries within app closure/notifications/power/priority batches.
+A fresh explicit start remains possible after completed OFF. Safe priority and
+toast originals can restore with Fortnite open; disruptive NIC/INI/workload
+recovery waits for exit. Denied recovery keeps the journal with mode stopped.
+The exact external user's incident was not reproduced on a live installation.
 
-NOT VALIDATED LIVE
-No restore point was created on this host, no profile/registry/service/NIC
-setting was applied, no active app was closed, no Fortnite input, capture,
-benchmark or stress test was run for1.7.0. PC2 was untouched. Source/fixture
-checks do not establish live driver compatibility, FPS gains, endgame stability,
-in-game settings acceptance or end-to-end latency. The installed1.5.0 controller
-and its files were not replaced as part of development.
+Startup updates automatically check/download/prepare a newer signed release.
+Game/recovery/busy state blocks replacement, offline/failure keeps the app
+usable, and persisted version/hash attempts prevent repeated automatic failure
+loops. Helper relaunches skip startup checking once.1.7.0 copies need one
+confirmed update before they gain1.7.1 automatic installation behavior.
 
-The Internet capture measures ping/jitter/loss proxies while Fortnite is closed.
-Actual NIC processing latency stays Unknown without valid trace evidence.
-Strict all-goal qualification therefore retains the baseline when processing
-is unavailable; provisional ping/stability application requires separate consent.
-Only bounded supported wired candidates are compared. Wi-Fi, router/ISP changes,
-DNS-for-game-ping claims and a globally optimal configuration are not established.
+No live optimization, Windows restore-point creation, NIC trial/probe, game
+input, capture, benchmark, stress test or PC2 operation validated this release.
+No FPS, endgame or input-latency gain is established. BIOS remains manual.
+O&O is separately installed verified GUI assistance, not silent Recommended
+apply. Native NIC processing stays Unknown without a valid trace; provisional
+ping/stability application requires separate consent. Windows Authenticode,
+multi-PC live compatibility and a full installed update/swap remain untested.
 
-O&O silent Recommended-only apply/exact undo is not implemented: separately
-installed verified vendor-GUI assistance is the supported integration. No O&O
-binary is bundled. Firmware recommendations remain manual. No blanket timer/
-BCD/security/voltage/clock/IRQ/CPU-affinity modifications are performed.
-
-Windows Authenticode signing, multi-PC live tuning qualification and a full
-consumer update/restart exercise against an active installation were not
-performed. Signed update manifests use a separate pinned RSA verification key.
+The competitor-gap scheduling/diagnostic/GPU modules are under separate
+work/implementation-1.8.0 development, excluded from this release's compile and
+publication. Heavy diagnostic sampling will require explicit Diagnostic Mode;
+it will not run automatically in Tournament Mode.

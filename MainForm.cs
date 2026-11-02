@@ -53,16 +53,21 @@ public sealed partial class MainForm : Form
     private bool _deferredRestoreAttempted;
     private bool _hotkeyToggle;
     private bool _hotkeyRestore;
+    private bool _startingTourney;
+    private bool _tourneyStartCanceled;
+    private CancellationTokenSource? _tourneyStartCancellation;
     private AppOptions _preferences;
     private readonly bool _preview;
+    private readonly bool _skipStartupUpdateOnce;
     private OptimizationPlan? _reviewedPlan;
 
-    public MainForm(TourneyEngine engine, bool preview = false) : this(engine, preview, preview ? new AppOptions() : engine.LoadOptions()) { }
+    public MainForm(TourneyEngine engine, bool preview = false, bool skipStartupUpdateOnce = false) : this(engine, preview, preview ? new AppOptions() : engine.LoadOptions(), skipStartupUpdateOnce) { }
 
-    private MainForm(TourneyEngine engine, bool preview, AppOptions options)
+    private MainForm(TourneyEngine engine, bool preview, AppOptions options, bool skipStartupUpdateOnce = false)
     {
         _engine = engine;
         _preview = preview;
+        _skipStartupUpdateOnce = skipStartupUpdateOnce;
         _preferences = PlannerDialog.CopyOptions(options);
         _preferences.Intent ??= new(); // ProfileDefaults owns safe migration; the UI never selects an all-ON preset.
         Text = ReleaseIdentity.Title + (preview ? " (preview)" : "");
@@ -242,8 +247,22 @@ public sealed partial class MainForm : Form
 
     private async Task ToggleAsync()
     {
-        if (_preview || _busy || _reviewDialogOpen || _updateInProgress) return;
-        if (_engine.IsActive) { await RequestRestoreAsync(false); return; }
+        if (_preview || _reviewDialogOpen || _updateInProgress) return;
+        if (_engine.IsActive || _startingTourney || _engine.ActivationBusy) { await RequestRestoreAsync(false); return; }
+        if (_busy) return;
+        using var cancellation = new CancellationTokenSource();
+        _tourneyStartCancellation = cancellation;
+        _startingTourney = true; _tourneyStartCanceled = false;
+        UpdateState();
+        try { await StartTourneyAsync(cancellation.Token); }
+        finally
+        {
+            _startingTourney = false; _tourneyStartCancellation = null;
+            if (!IsDisposed) UpdateState();
+        }
+    }
+    private async Task StartTourneyAsync(CancellationToken token)
+    {
         var options = ReadOptions();
         if (string.IsNullOrWhiteSpace(options.ReviewedPlanFingerprint))
         {
@@ -257,7 +276,7 @@ public sealed partial class MainForm : Form
             AppendLog("Revalidating this PC and the selected goal before activation. No settings changed yet.");
             plan = await Task.Run(() => _engine.AnalyzePlanAsync(options));
         });
-        if (IsDisposed || plan == null || _engine.IsActive) return;
+        if (IsDisposed || plan == null || _engine.IsActive || _tourneyStartCanceled || token.IsCancellationRequested) return;
         if (!string.Equals(plan.InventoryFingerprint, options.ReviewedPlanFingerprint, StringComparison.Ordinal))
         {
             AppendLog("PC, power, game state or plan choices changed. Review a fresh plan; this activation has been stopped.");
@@ -281,12 +300,15 @@ public sealed partial class MainForm : Form
             + (options.AutoRestoreOnGameExit ? "\r\nSettings will also restore automatically after the observed Fortnite client has exited for 15 seconds." : "")
             + "\r\n\r\nTurn off here, in the tray, or with Ctrl+Alt+F11 to restore settings and recorded Codex components. Discord stays running.";
         if (!PlanActivationDialog.Confirm(this, message, PerformancePlanner.Format(plan))) return;
+        if (_tourneyStartCanceled || token.IsCancellationRequested) return;
         await RunOperationAsync(async () =>
         {
+            if (_tourneyStartCanceled || token.IsCancellationRequested) return;
             _reviewedPlan = plan;
             ApplyPreferencesToControls(options);
             _engine.SaveOptions(options);
-            await Task.Run(() => _engine.EnableAsync(options));
+            try { await Task.Run(() => _engine.EnableAsync(options, token)); }
+            catch (OperationCanceledException) { AppendLog("Tourney startup stopped. Recorded changes will be restored or kept available for recovery."); }
             if (_engine.IsActive) PopulateRecoveryList();
         });
     }
@@ -294,9 +316,14 @@ public sealed partial class MainForm : Form
     private async Task RequestRestoreAsync(bool exit)
     {
         if (_preview) return;
+        _tourneyStartCanceled = true;
+        _tourneyStartCancellation?.Cancel();
         _tweakCancellation?.Cancel();
         _stripCancellation?.Cancel();
         _internetCancellation?.Cancel();
+        _startupUpdateInterrupted = true;
+        Interlocked.Increment(ref _updateInterruptionGeneration);
+        _updateCancellation?.Cancel();
         _engine.RequestRestore();
         _deferredRestoreAttempted = _engine.RecoveryDeferredUntilGameExit && !_engine.GameClientRunning;
         _exitAfterRestore |= exit;
@@ -375,10 +402,11 @@ public sealed partial class MainForm : Form
         bool tweak = string.Equals(VisibleSession?.Workflow, "Tweak", StringComparison.Ordinal);
         bool strip = string.Equals(VisibleSession?.Workflow, "Strip", StringComparison.Ordinal);
         bool internet = string.Equals(VisibleSession?.Workflow, "Internet", StringComparison.Ordinal);
-        _mode.Text = working ? "Working…" : recovery ? "Recovery available" : active ? internet ? VisibleSession?.InternetCalibration?.Restored == true ? "Network comparison ready for review" : "Network settings are active" : strip ? "Windows feature changes are active" : tweak ? "Tweak changes are active" : "Tourney Mode is on" : "Ready when you are";
+        bool stopped = VisibleTourneyStopped;
+        _mode.Text = stopped ? "Tourney is stopped. Recorded settings still need recovery." : working ? "Working…" : recovery ? "Recovery available" : active ? internet ? VisibleSession?.InternetCalibration?.Restored == true ? "Network comparison ready for review" : "Network settings are active" : strip ? "Windows feature changes are active" : tweak ? "Tweak changes are active" : "Tourney Mode is on" : "Ready when you are";
         _mode.ForeColor = recovery ? Color.FromArgb(245, 191, 111) : _accent;
-        _toggle.Text = working ? "Please wait" : active ? "Restore session" : "Turn on Tourney";
-        _toggle.Enabled = !working && !_updateInProgress;
+        _toggle.Text = stopped ? "Retry recovery" : active ? tweak || strip || internet ? "Restore changes" : "Turn off Tourney" : _startingTourney ? "Cancel start" : working ? "Please wait" : "Turn on Tourney";
+        _toggle.Enabled = (active || _startingTourney || !working) && !_reviewDialogOpen && !_updateInProgress;
         _toggle.BackColor = active ? Color.FromArgb(245, 191, 111) : _accent;
         _scan.Enabled = !working && !active;
         _apps.Enabled = !working && !active;
@@ -388,7 +416,7 @@ public sealed partial class MainForm : Form
         _features.Enabled = !working;
         _keepApps.Enabled = !working && !active;
         foreach (var check in new[] { _force, _priority, _silence, _power, _game, _fortniteOnly, _headroom, _keepClosed, _services, _network, _ethernet, _autoRestore, _closeCodex }) check.Enabled = !working && !active;
-        _tray.Text = active ? "Tourney Mode — on / recovery available" : "Tourney Mode — off";
+        _tray.Text = stopped ? "Tourney Mode — off / recovery pending" : active ? "Tourney Mode — on / recovery available" : "Tourney Mode — off";
         UpdateSelectionSummary();
         UpdateNavigationStatus();
     }
@@ -445,7 +473,19 @@ public sealed partial class MainForm : Form
     {
         if (_preview) return;
         if (_allowClose) return;
+        _updatesClosing = true;
+        _startupUpdateInterrupted = true;
+        Interlocked.Increment(ref _updateInterruptionGeneration);
+        _updateCancellation?.Cancel();
         if (e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing) return;
+        if (_startupUpdateRunning)
+        {
+            _exitAfterRestore = true;
+            _pendingRestore = true;
+            e.Cancel = true;
+            Hide();
+            return;
+        }
         if (_engine.IsActive || _busy)
         {
             e.Cancel = true;
@@ -471,6 +511,7 @@ public sealed partial class MainForm : Form
     {
         if (disposing)
         {
+            _updatesClosing = true;
             _timer.Stop();
             _timer.Dispose();
             if (IsHandleCreated)
@@ -481,6 +522,7 @@ public sealed partial class MainForm : Form
             _tray.Visible = false;
             _tray.Dispose();
             _toolTip.Dispose();
+            _tourneyStartCancellation?.Cancel();
             _tweakCancellation?.Cancel();
             _stripCancellation?.Cancel();
             _internetCancellation?.Cancel();

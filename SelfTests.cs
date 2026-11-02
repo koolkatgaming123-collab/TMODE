@@ -1009,7 +1009,8 @@ internal static class SelfTests
             await engine.EnableAsync(options);
             Check(fake.Plan == FakeSystem.OriginalPlan && fake.ResourceCaptures == 0 && !fake.Dnd
                 && fake.Priority == (int)ProcessPriorityClass.High, "Match-safe mode performed disruptive preparation.");
-            await engine.RestoreAsync(); Check(engine.RecoveryDeferredUntilGameExit, "Quiet match recovery did not defer.");
+            await engine.RestoreAsync(); Check(!engine.IsActive && engine.StopRequested && fake.Priority == (int)ProcessPriorityClass.Normal && !fake.NotificationsSuppressed,
+                "Safe-only OFF failed to restore priority/toast originals while the game stayed open.");
             fake.Processes.RemoveAll(ProcessPolicy.IsFortnite);
             await engine.RestoreAsync(); Check(!engine.IsActive, "Match-safe originals failed recovery.");
         });
@@ -1077,7 +1078,8 @@ internal static class SelfTests
             await engine.MaintainAsync();
             Check(fake.WatchedScans == 0 && fake.Processes.Any(p => p.Id == 990) && fake.PriorityAttempts == writes,
                 "Quiet mode scanned/closed returning apps or fought a later priority change.");
-            await engine.RestoreAsync(); Check(engine.RecoveryDeferredUntilGameExit, "Recovery restarted workloads during the game.");
+            await engine.RestoreAsync(); Check(!engine.IsActive && engine.StopRequested && fake.Priority == (int)ProcessPriorityClass.Normal && !fake.NotificationsSuppressed,
+                "Quiet OFF failed to finish safe-only recovery without restarting workloads.");
             fake.Processes.RemoveAll(ProcessPolicy.IsFortnite); await engine.RestoreAsync(); Check(!engine.IsActive, "Quiet recovery did not finish.");
         });
         await Test("unknown game presence blocks preparation without falsely arming game-exit restore", async () =>
@@ -1160,6 +1162,7 @@ internal static class SelfTests
         await BackgroundGovernorTests.RunAsync(Test);
         await TweakWorkflowTests.RunAsync(Test);
         await AppUpdaterTests.RunAsync(Test);
+        await StartupUpdatePolicyTests.RunAsync(Test);
         await WindowsStripTests.RunAsync(Test);
         await WindowsProfileTests.RunAsync(Test);
         await OOSPrivacyTests.RunAsync(Test);
@@ -1167,6 +1170,7 @@ internal static class SelfTests
         await OptimizationGuideTests.RunAsync(Test);
         await InternetOptimizerTests.RunAsync(Test);
         await InternetNativeHelperTests.RunAsync(Test);
+        await StopModeTests.RunAsync(Test);
         await Test("standalone embeds exact redistribution license texts", () =>
         {
             string notices = ThirdPartyNotices.ReadAll();

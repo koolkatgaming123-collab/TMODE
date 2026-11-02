@@ -8,7 +8,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>Tourney Mode</AssemblyName>
     <RootNamespace>TourneyMode</RootNamespace>
-    <Version>1.7.0</Version>
+    <Version>1.7.1</Version>
     <RuntimeFrameworkVersion>10.0.14</RuntimeFrameworkVersion>
     <TargetLatestRuntimePatch>false</TargetLatestRuntimePatch>
     <ApplicationManifest>app.manifest</ApplicationManifest>

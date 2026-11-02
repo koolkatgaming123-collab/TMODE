@@ -106,7 +106,7 @@ internal static class Program
                 catch { /* Show recovery UI and retain journal on partial failure. */ }
             }
             if (args.Contains("--restore") && !liveEngine.IsActive) return 0;
-            Forms.Application.Run(new MainForm(liveEngine));
+            Forms.Application.Run(new MainForm(liveEngine, skipStartupUpdateOnce: args.Contains("--skip-startup-update-once")));
             GC.KeepAlive(mutex);
             return 0;
         }

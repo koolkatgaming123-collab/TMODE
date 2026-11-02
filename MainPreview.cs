@@ -51,6 +51,13 @@ public sealed partial class MainForm
         _sessionOptionsExpanded = expanded; if (_sessionOptionsPanel != null) _sessionOptionsPanel.Visible = expanded;
     }
 
+    internal void PrepareSyntheticStopPreview(bool starting, bool working, SessionState? state)
+    {
+        if (!_preview) throw new InvalidOperationException("Synthetic stop state is available only in preview instances.");
+        _startingTourney = starting; _busy = working; _previewSession = state;
+        SelectNavigation("Overview"); UpdateState();
+    }
+
     internal void PrepareSyntheticStripPreview(StripBackup? review, SessionState? session = null)
     {
         if (!_preview) throw new InvalidOperationException("Synthetic UI setup is available only in preview instances.");

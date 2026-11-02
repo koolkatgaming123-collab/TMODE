@@ -19,13 +19,17 @@ public sealed partial class MainForm
     private CancellationTokenSource? _updateCancellation;
     private bool _updateInProgress;
     private bool _startupUpdateCheckStarted;
+    private bool _startupUpdateRunning;
+    private bool _startupUpdateInterrupted;
+    private bool _updatesClosing;
+    private long _updateInterruptionGeneration;
 
     private void BuildUpdatesPage(Panel page)
     {
         var stack = UiTheme.Stack(); page.Controls.Add(stack);
         var current = Card("Tourney Mode " + ReleaseIdentity.Version, "Stable release · Windows x64", out var currentBody);
         _updateMessage.Text = "Ready to check for a newer release."; _updateMessage.AutoSize = true; _updateMessage.ForeColor = UiTheme.Text; _updateMessage.Font = new Font("Segoe UI", 11, FontStyle.Bold); UiTheme.Add(currentBody, _updateMessage);
-        _updateTransfer.Text = "Checks are automatic while idle. Downloads and installs are always your choice."; _updateTransfer.AutoSize = true; _updateTransfer.ForeColor = UiTheme.Muted; UiTheme.Add(currentBody, _updateTransfer); UiTheme.Add(currentBody, _updateProgress);
+        _updateTransfer.Text = "Startup automatically checks, downloads and installs a newer signed release, then reopens this EXE."; _updateTransfer.AutoSize = true; _updateTransfer.ForeColor = UiTheme.Muted; UiTheme.Add(currentBody, _updateTransfer); UiTheme.Add(currentBody, _updateProgress);
         _updateAction.Click += async (_, _) => { if (!_preview) await UpdateActionAsync(); };
         _updateRecheck.Click += async (_, _) => { if (!_preview) await CheckUpdatesAsync(false); };
         _updateCancel.Click += (_, _) => _updateCancellation?.Cancel();
@@ -42,7 +46,7 @@ public sealed partial class MainForm
         UiTheme.Add(currentBody, updateActions); UiTheme.Add(stack, current);
         var notes = Card("Release notes", "Only verified release details appear here.", out var notesBody);
         _releaseNotes.Dock = DockStyle.Fill; _releaseNotes.Height = 280; _releaseNotes.ReadOnly = true; _releaseNotes.BorderStyle = BorderStyle.None; _releaseNotes.DetectUrls = false; _releaseNotes.BackColor = UiTheme.Surface; _releaseNotes.ForeColor = UiTheme.Muted; _releaseNotes.Font = new Font("Segoe UI", 10); _releaseNotes.Text = "Check for updates to see release information."; _releaseNotes.AccessibleName = "Verified release notes"; UiTheme.Add(notesBody, _releaseNotes); UiTheme.Add(stack, notes);
-        var trust = Card("An update you control", "Each release is verified against its signed release information and file hash. Installation waits until Fortnite is closed and no optimization or recovery session is active. You confirm before this app closes and restarts.", out var trustBody);
+        var trust = Card("Automatic at startup", "Signed updates install automatically when Fortnite is closed and no optimization or recovery session is active. An offline check or failed update leaves the current version usable. A failed automatic target waits for a newer release or your manual retry, avoiding a restart loop.", out var trustBody);
         _thirdPartyLicenses.Click += (_, _) => { if (!_preview) ShowThirdPartyLicenses(); };
         UiTheme.Add(trustBody, Actions(_thirdPartyLicenses)); UiTheme.Add(stack, trust);
     }
@@ -88,6 +92,7 @@ public sealed partial class MainForm
                     if (IsDisposed) return;
                     _updateTransfer.Text = progress.Message;
                     _updateProgress.Value = (int)Math.Clamp(progress.Percent ?? 0, 0, 100);
+                    if (_startupUpdateRunning && progress.Stage is "Downloading" or "Staged" or "RestartReady") SelectNavigation("Updates");
                 }));
             }
             catch (InvalidOperationException) { }
@@ -98,13 +103,66 @@ public sealed partial class MainForm
     {
         if (_preview || _startupUpdateCheckStarted) return;
         _startupUpdateCheckStarted = true;
-        if (_engine.IsActive || _engine.GameClientRunning)
+        if (_skipStartupUpdateOnce)
         {
-            _updateTransfer.Text = "Automatic check deferred while Fortnite or a session is active. Check again when ready.";
+            _updateTransfer.Text = "Update restart complete. Automatic checks resume the next time you open TMODE.";
             return;
         }
-        await CheckUpdatesAsync(true);
+        using var cancellation = new CancellationTokenSource();
+        _updateCancellation = cancellation;
+        _startupUpdateRunning = true;
+        _updateInProgress = true;
+        _busy = true;
+        StartupUpdateResult? startupResult = null;
+        UpdateState();
+        try
+        {
+            _updateMessage.Text = "Checking for a signed startup update…";
+            var result = startupResult = await new StartupUpdatePolicy(Updater(), StartupUpdateSafetyState).RunAsync(cancellation.Token);
+            if (IsDisposed) return;
+            _updateCandidate = result.CheckResult?.Candidate;
+            _stagedUpdate = result.StagedUpdate;
+            _updateMessage.Text = result.Message;
+            _releaseNotes.Text = _updateCandidate?.Notes ?? "The current version continues when no safe newer release is available.";
+            AppendLog("Startup update: " + result.Message);
+            if (result.ShouldExit && !cancellation.IsCancellationRequested && StartupUpdateSafetyState().IsSafe)
+            {
+                try { _engine.SaveOptions(ReadOptions()); } catch (Exception error) { AppendLog("Could not save preferences before restart: " + error.Message); }
+                if (Updater().AuthorizeParentExit(result.LaunchResult!, () => !StartupUpdateSafetyState().IsSafe, cancellation.Token))
+                {
+                    _allowClose = true;
+                    Close();
+                }
+            }
+        }
+        catch (Exception error)
+        {
+            if (!IsDisposed) { _updateMessage.Text = "Automatic updating could not finish. The current app remains usable."; AppendLog(_updateMessage.Text + " " + error.GetType().Name); }
+        }
+        finally
+        {
+            startupResult?.LaunchResult?.Dispose();
+            _updateCancellation = null;
+            _startupUpdateRunning = false;
+            _updateInProgress = false;
+            _busy = false;
+            if (!IsDisposed) UpdateState();
+        }
+        if (_pendingRestore && !IsDisposed) await RequestRestoreAsync(_exitAfterRestore);
     }
+    // AppUpdater can query this from a worker thread. Read fields, engine state and disk;
+    // never inspect controls or count this pipeline's own busy flags as another operation.
+    private StartupUpdateSafety StartupUpdateSafetyState() => new()
+    {
+        GameDefinitelyAbsent = !_engine.GameClientRunning,
+        SessionActive = _engine.IsActive,
+        RecoveryJournalPresent = File.Exists(Path.Combine(_engine.DataDirectory, "session.json")),
+        Busy = (Volatile.Read(ref _busy) && !Volatile.Read(ref _startupUpdateRunning))
+            || Volatile.Read(ref _reviewDialogOpen) || Volatile.Read(ref _maintaining)
+            || Volatile.Read(ref _pendingRestore) || Volatile.Read(ref _exitAfterRestore)
+            || Volatile.Read(ref _startupUpdateInterrupted) || Volatile.Read(ref _updatesClosing)
+            || _engine.InternetBusy || _engine.ActivationBusy
+    };
     private async Task CheckUpdatesAsync(bool automatic)
     {
         if (_preview || _updateInProgress || _busy || _reviewDialogOpen) return;
@@ -155,21 +213,31 @@ public sealed partial class MainForm
             finally { _updateCancellation = null; _updateInProgress = false; if (!IsDisposed) UpdateState(); }
             return;
         }
-        if (MessageBox.Show(this, "Install Tourney Mode " + _stagedUpdate.Version + " and restart this app?\r\n\r\nFortnite must remain closed and all session changes must be restored. The installer preserves a backup of the current executable.", "Install and restart", MessageBoxButtons.OKCancel, MessageBoxIcon.Information, MessageBoxDefaultButton.Button2) != DialogResult.OK) return;
+        long interruption = Volatile.Read(ref _updateInterruptionGeneration);
+        bool InstallBlocked() => UpdateBlocked() || Volatile.Read(ref _pendingRestore) || Volatile.Read(ref _exitAfterRestore)
+            || Volatile.Read(ref _updateInterruptionGeneration) != interruption;
+        if (MessageBox.Show(this, "Install Tourney Mode " + _stagedUpdate.Version + " and restart this app?\r\n\r\nFortnite must remain closed and all session changes must be restored. The installer preserves a backup of the current executable.", "Install and restart", MessageBoxButtons.OKCancel, MessageBoxIcon.Information, MessageBoxDefaultButton.Button2) != DialogResult.OK || InstallBlocked()) return;
+        using var installCancellation = new CancellationTokenSource();
+        _updateCancellation = installCancellation;
         _updateInProgress = true;
         try
         {
             await RunOperationAsync(async () =>
             {
-                if (UpdateBlocked()) { _updateMessage.Text = "Installation paused because Fortnite or a session became active."; return; }
-                var result = await Updater().LaunchApplyHelperAsync(_stagedUpdate, UpdateBlocked);
-                _updateMessage.Text = result.Message; AppendLog("Update install: " + result.Message);
-                if (!result.Started || UpdateBlocked()) return;
-                try { _engine.SaveOptions(ReadOptions()); } catch (Exception error) { AppendLog("Could not save preferences before restart: " + error.Message); }
-                _allowClose = true; Close();
+                try
+                {
+                    if (InstallBlocked()) { _updateMessage.Text = "Installation paused because activity or recovery changed."; return; }
+                    using var result = await Updater().LaunchApplyHelperAsync(_stagedUpdate, InstallBlocked, installCancellation.Token);
+                    _updateMessage.Text = result.Message; AppendLog("Update install: " + result.Message);
+                    if (!result.Started || installCancellation.IsCancellationRequested || InstallBlocked()) return;
+                    try { _engine.SaveOptions(ReadOptions()); } catch (Exception error) { AppendLog("Could not save preferences before restart: " + error.Message); }
+                    if (Updater().AuthorizeParentExit(result, InstallBlocked, installCancellation.Token)) { _allowClose = true; Close(); }
+                    else _updateMessage.Text = "Installation was not authorized. The current app continues.";
+                }
+                catch (OperationCanceledException) { _updateMessage.Text = "Update preparation canceled. No replacement was authorized."; AppendLog(_updateMessage.Text); }
             });
         }
-        finally { _updateInProgress = false; if (!IsDisposed) UpdateState(); }
+        finally { _updateCancellation = null; _updateInProgress = false; if (!IsDisposed) UpdateState(); }
     }
     private void UpdateUpdateControls()
     {

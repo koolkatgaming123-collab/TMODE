@@ -31,6 +31,10 @@ public sealed class AppUpdater : IDisposable
     private readonly HttpClient client;
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly Func<string, ExecutableInfo> inspect;
+    private readonly object authorizationOwner = new();
+    private readonly object preparedSync = new();
+    private readonly HashSet<ParentExitAuthorization> preparedAuthorizations = [];
+    private int disposed;
     public event Action<UpdateProgress>? Progress;
 
     public AppUpdater(UpdateSettings settings, HttpMessageHandler? handler = null)
@@ -162,8 +166,10 @@ public sealed class AppUpdater : IDisposable
     {
         ArgumentNullException.ThrowIfNull(update); ArgumentNullException.ThrowIfNull(isBusy);
         await operations.WaitAsync(cancellationToken).ConfigureAwait(false);
+        EventWaitHandle? ready = null, go = null;
         try
         {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
             RequireSafe(isBusy);
             var manifest = ValidateStage(update);
             RequireNewerCompatible(manifest, CurrentFloor());
@@ -189,8 +195,8 @@ public sealed class AppUpdater : IDisposable
             };
             string ticketPath = Path.Combine(helperDirectory, TicketFile);
             WriteProtected(ticketPath, ticket);
-            using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, ReadyEvent(id));
-            using var go = new EventWaitHandle(false, EventResetMode.ManualReset, GoEvent(id));
+            ready = new EventWaitHandle(false, EventResetMode.ManualReset, ReadyEvent(id));
+            go = new EventWaitHandle(false, EventResetMode.ManualReset, GoEvent(id));
             using var process = Process.Start(new ProcessStartInfo(helperPath)
             {
                 UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
@@ -205,18 +211,119 @@ public sealed class AppUpdater : IDisposable
             await acknowledged.ConfigureAwait(false);
             RequireSafe(isBusy);
             cancellationToken.ThrowIfCancellationRequested();
-            go.Set(); // No update is authorized if this handshake never completes.
-            Report("RestartReady", "Update helper is ready. Close this inactive app to finish installing version " + manifest.Version + ".");
-            return new() { Started = true, HelperProcessId = process.Id, TicketPath = ticketPath, Message = "The helper is waiting for this exact app process to exit. No process will be killed." };
+            var helperIdentity = new ProcessIdentity { Id = process.Id, StartTicks = process.StartTime.ToUniversalTime().Ticks,
+                SessionId = process.SessionId, Path = helperPath, Name = process.ProcessName + ".exe" };
+            var readyHandle = ready!; var goHandle = go!;
+            var authorization = new ParentExitAuthorization(authorizationOwner, DateTime.UtcNow, () => DateTime.UtcNow,
+                () => readyHandle.WaitOne(0) && VerifyPreparedIdentities(ticket, helperIdentity),
+                () => goHandle.Set(), () => { readyHandle.Dispose(); goHandle.Dispose(); });
+            RegisterPrepared(authorization);
+            ready = null; go = null; // The opaque result now owns both handles.
+            Report("RestartReady", "Update helper is prepared. Final authorization is required immediately before this app exits.");
+            return new() { Started = true, HelperProcessId = process.Id, TicketPath = ticketPath, Authorization = authorization,
+                Message = "The helper is prepared but has no installation grant. Cancel or keep this app open to leave the current version unchanged." };
         }
         catch (Exception error) when (error is not OperationCanceledException)
         { return new() { Started = false, Message = SafeFailure("Update preparation", error) }; }
-        finally { operations.Release(); }
+        finally { ready?.Dispose(); go?.Dispose(); operations.Release(); }
+    }
+
+    /// <summary>
+    /// Commits a prepared helper once. The UI must call this synchronously just
+    /// before its normal Close, with no await/message loop between true and Close.
+    /// A public ticket path or a result from another updater cannot grant access.
+    /// </summary>
+    public bool AuthorizeParentExit(UpdateLaunchResult prepared, Func<bool>? isBusy = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(prepared);
+        bool authorized = prepared.Started && prepared.Authorization?.TryAuthorize(authorizationOwner,
+            () => Volatile.Read(ref disposed) == 0, () => RequireSafe(isBusy), cancellationToken) == true;
+        if (!authorized) Report("RestartDeferred", "Update exit authorization was canceled, expired or unsafe. The current app stays usable.");
+        return authorized;
+    }
+
+    private bool VerifyPreparedIdentities(ApplyTicket ticket, ProcessIdentity helperIdentity)
+    {
+        using var parent = Process.GetCurrentProcess();
+        if (!ProcessCatalog.MatchesPinned(parent, ticket.Parent)
+            || !SamePath(ProcessCatalog.GetPath(parent.Id), ticket.InstalledExecutablePath)) return false;
+        using var helper = Process.GetProcessById(helperIdentity.Id);
+        if (helper.HasExited || !ProcessCatalog.MatchesPinned(helper, helperIdentity)) return false;
+        ValidateLocalPath(ticket.InstalledExecutablePath, false); ValidateLocalPath(helperIdentity.Path, false);
+        return FixedHashEquals(HashFile(ticket.InstalledExecutablePath), ticket.OriginalSha256)
+            && FixedHashEquals(HashFile(helperIdentity.Path), ticket.OriginalSha256);
+    }
+
+    private void RegisterPrepared(ParentExitAuthorization authorization)
+    {
+        lock (preparedSync)
+        {
+            if (Volatile.Read(ref disposed) != 0) { authorization.Dispose(); throw new ObjectDisposedException(nameof(AppUpdater)); }
+            preparedAuthorizations.Add(authorization);
+            authorization.Released = () => { lock (preparedSync) preparedAuthorizations.Remove(authorization); };
+        }
+    }
+
+    // The same one-shot coordinator is exercised with inert callbacks in fixtures.
+    // Production callbacks own named events and revalidate pinned real processes.
+    internal sealed class ParentExitAuthorization(object owner, DateTime preparedUtc, Func<DateTime> utcNow,
+        Func<bool> readyAndIdentitiesValid, Action signalGo, Action release) : IDisposable
+    {
+        private readonly object sync = new();
+        private bool consumed;
+        internal Action? Released { get; set; }
+        internal bool TryAuthorize(object requester, Func<bool> ownerAlive, Action requireSafe, CancellationToken token)
+        {
+            if (!ReferenceEquals(owner, requester)) return false; // A wrong owner cannot consume someone else's capability.
+            lock (sync)
+            {
+                if (consumed) return false;
+                try
+                {
+                    token.ThrowIfCancellationRequested(); RequireTimely();
+                    if (consumed || !ownerAlive()) return false;
+                    requireSafe();
+                    if (!readyAndIdentitiesValid()) return false;
+                    token.ThrowIfCancellationRequested(); RequireTimely();
+                    if (consumed || !ownerAlive()) return false;
+                    requireSafe();
+                    token.ThrowIfCancellationRequested(); RequireTimely();
+                    if (consumed || !ownerAlive()) return false;
+                    signalGo(); // The only parent-side GO. Remaining cleanup is synchronous; no message loop/await.
+                    return true;
+                }
+                catch { return false; }
+                finally { Consume(); }
+            }
+        }
+        private void RequireTimely()
+        {
+            DateTime now = utcNow();
+            if (preparedUtc.Kind != DateTimeKind.Utc || now.Kind != DateTimeKind.Utc || now < preparedUtc || now - preparedUtc > TimeSpan.FromSeconds(15))
+                throw new InvalidOperationException("The prepared update authorization expired.");
+        }
+        private void Consume()
+        {
+            if (consumed) return;
+            consumed = true;
+            try { release(); } catch { }
+            try { Released?.Invoke(); } catch { }
+        }
+        public void Dispose() { lock (sync) Consume(); }
+    }
+
+    internal UpdateLaunchResult CreatePreparedApplyFixture(Func<bool> readyAndIdentitiesValid, Action signalGo,
+        DateTime preparedUtc, Func<DateTime> utcNow, Action? release = null)
+    {
+        var authorization = new ParentExitAuthorization(authorizationOwner, preparedUtc, utcNow, readyAndIdentitiesValid, signalGo, release ?? (() => { }));
+        RegisterPrepared(authorization);
+        return new() { Started = true, Authorization = authorization, Message = "Inert prepared-helper authorization fixture." };
     }
 
     public async Task<int> RunApplyHelperAsync(string ticketPath, CancellationToken cancellationToken = default)
     {
         string? helperDirectory = null; ApplyTicket? ticket = null; string phase = "Validating"; bool replaced = false; bool ownedHelperDirectory = false;
+        bool trustedTicket = false, parentExited = false, replacementAttempted = false;
         string? backup = null; string? pending = null;
         try
         {
@@ -238,6 +345,7 @@ public sealed class AppUpdater : IDisposable
                 throw new InvalidDataException("The parent/installed EXE no longer matches the copied update helper.");
             using var parent = Process.GetProcessById(ticket.Parent.Id);
             if (!ProcessCatalog.MatchesPinned(parent, ticket.Parent)) throw new InvalidDataException("The update parent PID, start identity or executable path changed.");
+            trustedTicket = true;
             using var ready = EventWaitHandle.OpenExisting(ReadyEvent(ticket.Id));
             using var go = EventWaitHandle.OpenExisting(GoEvent(ticket.Id));
             ready.Set();
@@ -252,6 +360,7 @@ public sealed class AppUpdater : IDisposable
                 wait.CancelAfter(settings.ParentExitTimeout);
                 await parent.WaitForExitAsync(wait.Token).ConfigureAwait(false);
             }
+            parentExited = true;
             // A copied helper contains the same pinned public key as its parent.
             // Revalidate all authenticated data and the payload after the wait.
             var staged = new StagedUpdate
@@ -284,6 +393,7 @@ public sealed class AppUpdater : IDisposable
                     RequireSafe(null); // Recheck the journal and game immediately before mutation.
                     ValidateLocalPath(ticket.InstalledExecutablePath, false);
                     if (!FixedHashEquals(HashFile(ticket.InstalledExecutablePath), ticket.OriginalSha256)) throw new InvalidDataException("The installed EXE changed before replacement.");
+                    replacementAttempted = true; // A throwing swap has an uncertain outcome; never treat it as an untouched original.
                     File.Replace(pending, ticket.InstalledExecutablePath, backup, false); replaced = true; pending = null;
                     VerifyFile(ticket.InstalledExecutablePath, manifest, InspectExecutable);
                     phase = "Replacement verified"; WriteOutcome(helperDirectory, phase, "Version, size and SHA-256 match the signed release. Original backup retained.");
@@ -299,7 +409,7 @@ public sealed class AppUpdater : IDisposable
         }
         catch (Exception error)
         {
-            bool rolledBack = false;
+            bool rolledBack = false, restartedOriginal = false;
             if (replaced && ticket != null && backup != null)
             {
                 try
@@ -324,13 +434,63 @@ public sealed class AppUpdater : IDisposable
                 }
                 catch (Exception rollback) { error = new AggregateException(error, rollback); }
             }
-            if (pending != null) { try { ValidateLocalPath(pending, false); File.Delete(pending); } catch { } }
+            else if (ticket != null)
+            {
+                try
+                {
+                    restartedOriginal = RestartUnchangedOriginal(new(trustedTicket, parentExited, replacementAttempted,
+                        ticket.InstalledExecutablePath, ticket.OriginalSha256, ticket.OriginalVersion), action =>
+                    {
+                        using var controller = new Mutex(false, @"Local\TourneyMode-" + Environment.UserName);
+                        bool acquired; try { acquired = controller.WaitOne(0); } catch (AbandonedMutexException) { acquired = true; }
+                        if (!acquired) throw new InvalidOperationException("A Tourney Mode process is running; original-app restart was deferred.");
+                        try { action(); } finally { controller.ReleaseMutex(); }
+                    }, () => RequireSafe(null), InspectExecutable, path => { using var original = StartApp(path); });
+                }
+                catch (Exception restart) { error = new AggregateException(error, restart); }
+            }
+            if (pending != null && !replacementAttempted) { try { ValidateLocalPath(pending, false); File.Delete(pending); } catch { } }
             if (ownedHelperDirectory && helperDirectory != null)
             {
-                try { WriteOutcome(helperDirectory, rolledBack ? "Rolled back" : replaced ? "Needs recovery" : "Not applied", SafeFailure(phase, error)); } catch { }
+                try { WriteOutcome(helperDirectory, rolledBack ? "Rolled back" : restartedOriginal ? "Original app restarted" : replacementAttempted ? "Needs recovery" : "Not applied", SafeFailure(phase, error)); } catch { }
             }
             return rolledBack ? 2 : 1;
         }
+    }
+
+    internal sealed record OriginalRestartState(bool TicketTrusted, bool ParentExited, bool ReplacementAttempted,
+        string InstalledExecutablePath, string OriginalSha256, string OriginalVersion);
+
+    // The callbacks permit inert restart-decision fixtures. Production supplies the
+    // real controller mutex, safety gates, PE inspector and process launcher.
+    internal static bool RestartUnchangedOriginal(OriginalRestartState state, Action<Action> withControllerOwnership,
+        Action requireSafe, Func<string, ExecutableInfo> inspector, Action<string> startOriginal)
+    {
+        if (!state.TicketTrusted || !state.ParentExited || state.ReplacementAttempted) return false;
+        FileStream? pinnedOriginal = null;
+        try
+        {
+            withControllerOwnership(() =>
+            {
+                requireSafe();
+                ValidateLocalPath(state.InstalledExecutablePath, false);
+                // Deny writes/deletion until process creation returns, so the
+                // verified original cannot be swapped between validation and launch.
+                pinnedOriginal = new FileStream(state.InstalledExecutablePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                if (!FixedHashEquals(Convert.ToHexString(SHA256.HashData(pinnedOriginal)), state.OriginalSha256))
+                    throw new InvalidDataException("The original EXE changed; automatic restart was refused.");
+                var original = inspector(state.InstalledExecutablePath);
+                if (!original.WindowsX64 || original.Product is not ("Tourney Mode" or "TourneyMode")
+                    || Normalize(original.Version) != ParseVersion(state.OriginalVersion))
+                    throw new InvalidDataException("The original EXE metadata changed; automatic restart was refused.");
+            });
+            // The application must acquire its own controller mutex on startup.
+            // Release our ownership before launching, then recheck game/recovery.
+            requireSafe();
+            startOriginal(state.InstalledExecutablePath);
+            return true;
+        }
+        finally { pinnedOriginal?.Dispose(); }
     }
 
     internal UpdateManifest ValidateEnvelope(string envelope)
@@ -590,7 +750,12 @@ public sealed class AppUpdater : IDisposable
         using var cancelled = token.Register(() => completion.TrySetCanceled(token));
         try { await completion.Task.ConfigureAwait(false); } finally { registration.Unregister(null); }
     }
-    private static Process StartApp(string path) => Process.Start(new ProcessStartInfo(path) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(path)! })
+    internal static ProcessStartInfo CreateRestartStartInfo(string path) => new(path)
+    {
+        UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(path)!,
+        ArgumentList = { "--skip-startup-update-once" }
+    };
+    private static Process StartApp(string path) => Process.Start(CreateRestartStartInfo(path))
         ?? throw new InvalidOperationException("The updated app could not start.");
     private static void WriteOutcome(string directory, string phase, string message)
     {
@@ -641,6 +806,10 @@ public sealed class AppUpdater : IDisposable
     }
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+        ParentExitAuthorization[] outstanding;
+        lock (preparedSync) { outstanding = preparedAuthorizations.ToArray(); preparedAuthorizations.Clear(); }
+        foreach (var prepared in outstanding) prepared.Dispose();
         client.Dispose();
         // The semaphore owns no native handle here. Leave it alive for an
         // in-flight async operation's finally block when the UI is closing.

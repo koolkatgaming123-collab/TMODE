@@ -201,7 +201,171 @@ public static class AppUpdaterTests
                 Expect<InvalidDataException>(() => AppUpdater.ValidateLocalPath(path, false));
             return Task.CompletedTask;
         });
+        await test("failed update restarts only the pinned unchanged original after controller ownership is released", () =>
+        {
+            using var fixture = new Fixture(signing);
+            File.WriteAllBytes(fixture.Settings.InstalledExecutablePath, fixture.Bytes);
+            bool controllerHeld = false, launched = false; int safetyChecks = 0;
+            bool restarted = AppUpdater.RestartUnchangedOriginal(OriginalRestartState(fixture), action =>
+            {
+                controllerHeld = true;
+                try { action(); } finally { controllerHeld = false; }
+            }, () => safetyChecks++, _ => new(new Version(1, 7, 0), "Tourney Mode", true), path =>
+            {
+                Check(!controllerHeld && path == fixture.Settings.InstalledExecutablePath, "Restart retained the controller mutex or changed the original path.");
+                // The real file remains pinned through the inert launch callback.
+                Expect<IOException>(() => { using var writer = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete); });
+                launched = true;
+            });
+            Check(restarted && launched && safetyChecks == 2, "An unchanged original was not restarted with both safety checks.");
+            File.WriteAllBytes(fixture.Settings.InstalledExecutablePath, fixture.Bytes); // The pin must be released afterward.
+            return Task.CompletedTask;
+        });
+        await test("untrusted ticket, live parent or attempted replacement never enters original restart callbacks", () =>
+        {
+            using var fixture = new Fixture(signing);
+            var valid = OriginalRestartState(fixture);
+            foreach (var state in new[] { valid with { TicketTrusted = false }, valid with { ParentExited = false }, valid with { ReplacementAttempted = true } })
+            {
+                bool callbackReached = false;
+                bool restarted = AppUpdater.RestartUnchangedOriginal(state, _ => callbackReached = true, () => callbackReached = true,
+                    _ => { callbackReached = true; return new(new Version(1, 7, 0), "Tourney Mode", true); }, _ => callbackReached = true);
+                Check(!restarted && !callbackReached, "An unauthorized, live-parent or uncertain-swap failure reached restart work.");
+            }
+            return Task.CompletedTask;
+        });
+        await test("original restart refuses changed hash, version, architecture, product and invalid path", () =>
+        {
+            foreach (string kind in new[] { "hash", "version", "architecture", "product", "path" })
+            {
+                using var fixture = new Fixture(signing);
+                File.WriteAllBytes(fixture.Settings.InstalledExecutablePath, kind == "hash" ? [1, 2, 3] : fixture.Bytes);
+                var state = OriginalRestartState(fixture);
+                if (kind == "path") state = state with { InstalledExecutablePath = @"\\server\share\current.exe" };
+                bool launched = false;
+                Expect<InvalidDataException>(() => AppUpdater.RestartUnchangedOriginal(state, action => action(), () => { }, _ => new(
+                    kind == "version" ? new Version(1, 7, 1) : new Version(1, 7, 0), kind == "product" ? "Other product" : "Tourney Mode", kind != "architecture"), _ => launched = true));
+                Check(!launched, "Changed original " + kind + " reached a process launcher.");
+                File.WriteAllBytes(fixture.Settings.InstalledExecutablePath, fixture.Bytes); // Validation failures must release any file pin.
+            }
+            return Task.CompletedTask;
+        });
+        await test("controller and early or late game/recovery guards prevent original restart", () =>
+        {
+            foreach (string blocker in new[] { "controller", "early-safety", "late-safety" })
+            {
+                using var fixture = new Fixture(signing); File.WriteAllBytes(fixture.Settings.InstalledExecutablePath, fixture.Bytes);
+                bool launched = false; int safetyChecks = 0;
+                Expect<InvalidOperationException>(() => AppUpdater.RestartUnchangedOriginal(OriginalRestartState(fixture), action =>
+                {
+                    if (blocker == "controller") throw new InvalidOperationException("fixture existing controller");
+                    action();
+                }, () =>
+                {
+                    safetyChecks++;
+                    if (blocker == "early-safety" || blocker == "late-safety" && safetyChecks == 2)
+                        throw new InvalidOperationException("fixture game or recovery became active");
+                }, _ => new(new Version(1, 7, 0), "Tourney Mode", true), _ => launched = true));
+                Check(!launched, "An active controller or game/recovery guard reached restart.");
+                File.WriteAllBytes(fixture.Settings.InstalledExecutablePath, fixture.Bytes);
+            }
+            return Task.CompletedTask;
+        });
+        await test("all helper restarts suppress exactly one startup auto-update without a shell command", () =>
+        {
+            using var fixture = new Fixture(signing);
+            var info = AppUpdater.CreateRestartStartInfo(fixture.Settings.InstalledExecutablePath);
+            Check(info.FileName == fixture.Settings.InstalledExecutablePath && info.WorkingDirectory == fixture.Root
+                && info.ArgumentList.SequenceEqual(new[] { "--skip-startup-update-once" }) && info.Arguments.Length == 0,
+                "A helper restart can chain an immediate auto-update or interpreted a shell command.");
+            return Task.CompletedTask;
+        });
+        await test("prepared update has no grant until synchronous owner authorization and commits at most once", () =>
+        {
+            using var fixture = new Fixture(signing); using var updater = fixture.Create();
+            DateTime now = DateTime.UtcNow; int grants = 0, released = 0;
+            using var prepared = updater.CreatePreparedApplyFixture(() => true, () => grants++, now, () => now, () => released++);
+            Check(prepared.Started && grants == 0 && released == 0, "Preparation granted an update or prematurely released readiness.");
+            Check(updater.AuthorizeParentExit(prepared) && grants == 1 && released == 1, "A valid same-owner final commit did not signal exactly once.");
+            Check(!updater.AuthorizeParentExit(prepared) && grants == 1, "The same prepared helper was granted twice.");
+            return Task.CompletedTask;
+        });
+        await test("another updater or a public ticket path cannot authorize a prepared helper", () =>
+        {
+            using var fixture = new Fixture(signing); using var owner = fixture.Create(); using var other = fixture.Create();
+            DateTime now = DateTime.UtcNow; int grants = 0;
+            using var prepared = owner.CreatePreparedApplyFixture(() => true, () => grants++, now, () => now);
+            Check(!other.AuthorizeParentExit(prepared) && grants == 0, "A different updater granted a capability it did not create.");
+            using var forged = new UpdateLaunchResult { Started = true, TicketPath = prepared.TicketPath, HelperProcessId = prepared.HelperProcessId };
+            Check(!owner.AuthorizeParentExit(forged) && grants == 0, "A public result/ticket path acted as update authorization.");
+            Check(owner.AuthorizeParentExit(prepared) && grants == 1, "A wrong-owner attempt consumed the real owner's capability.");
+            return Task.CompletedTask;
+        });
+        await test("late cancellation before, during identity validation or at the final safety check never grants GO", () =>
+        {
+            foreach (string point in new[] { "before", "identity", "final-safety" })
+            {
+                using var fixture = new Fixture(signing); using var updater = fixture.Create(); using var cancellation = new CancellationTokenSource();
+                DateTime now = DateTime.UtcNow; int grants = 0, released = 0, safety = 0;
+                using var prepared = updater.CreatePreparedApplyFixture(() => { if (point == "identity") cancellation.Cancel(); return true; },
+                    () => grants++, now, () => now, () => released++);
+                if (point == "before") cancellation.Cancel();
+                bool granted = updater.AuthorizeParentExit(prepared, () =>
+                { if (++safety == 2 && point == "final-safety") cancellation.Cancel(); return false; }, cancellation.Token);
+                Check(!granted && grants == 0 && released == 1 && !updater.AuthorizeParentExit(prepared), "Canceled handoff still granted or retained a reusable helper.");
+            }
+            return Task.CompletedTask;
+        });
+        await test("expired, revoked or disposed-owner helper preparations cannot authorize parent exit", () =>
+        {
+            foreach (string kind in new[] { "expired", "revoked", "owner-disposed", "clock-reversed" })
+            {
+                using var fixture = new Fixture(signing); using var updater = fixture.Create(); DateTime ready = DateTime.UtcNow; int grants = 0, released = 0;
+                DateTime clock = kind == "expired" ? ready.AddSeconds(16) : kind == "clock-reversed" ? ready.AddSeconds(-1) : ready;
+                using var prepared = updater.CreatePreparedApplyFixture(() => true, () => grants++, ready, () => clock, () => released++);
+                if (kind == "revoked") prepared.Dispose();
+                if (kind == "owner-disposed") updater.Dispose();
+                Check(!updater.AuthorizeParentExit(prepared) && grants == 0 && released == 1, "An expired/revoked/disposed preparation granted an update.");
+            }
+            return Task.CompletedTask;
+        });
+        await test("game, engine, recovery journal and caller busy state are checked again at final authorization", () =>
+        {
+            foreach (string blocker in new[] { "game", "engine", "journal", "busy", "late-game" })
+            {
+                using var fixture = new Fixture(signing); using var updater = fixture.Create(); DateTime now = DateTime.UtcNow; int grants = 0;
+                using var prepared = updater.CreatePreparedApplyFixture(() => { if (blocker == "late-game") fixture.GameRunning = true; return true; },
+                    () => grants++, now, () => now);
+                if (blocker == "game") fixture.GameRunning = true;
+                if (blocker == "engine") fixture.EngineActive = true;
+                if (blocker == "journal") File.WriteAllText(fixture.Settings.JournalPath, "fixture pending recovery");
+                Check(!updater.AuthorizeParentExit(prepared, () => blocker == "busy") && grants == 0, "A newly unsafe app/game/journal state granted GO.");
+            }
+            return Task.CompletedTask;
+        });
+        await test("missing readiness or changed parent/helper identity refuses GO and releases handles once", () =>
+        {
+            foreach (bool throws in new[] { false, true })
+            {
+                using var fixture = new Fixture(signing); using var updater = fixture.Create(); DateTime now = DateTime.UtcNow; int grants = 0, released = 0;
+                using var prepared = updater.CreatePreparedApplyFixture(() => throws ? throw new InvalidOperationException("fixture identity query unavailable") : false,
+                    () => grants++, now, () => now, () => released++);
+                Check(!updater.AuthorizeParentExit(prepared) && grants == 0 && released == 1, "Dead/changed/unverifiable helper readiness granted GO.");
+                prepared.Dispose(); Check(released == 1, "A failed prepared helper released its handles twice.");
+            }
+            return Task.CompletedTask;
+        });
+        await test("owner disposal during readiness validation revokes its prepared helper without a grant", () =>
+        {
+            using var fixture = new Fixture(signing); using var updater = fixture.Create(); DateTime now = DateTime.UtcNow; int grants = 0;
+            using var prepared = updater.CreatePreparedApplyFixture(() => { updater.Dispose(); return true; }, () => grants++, now, () => now);
+            Check(!updater.AuthorizeParentExit(prepared) && grants == 0, "A disposed owner still authorized a pending helper.");
+            return Task.CompletedTask;
+        });
     }
+
+    private static AppUpdater.OriginalRestartState OriginalRestartState(Fixture fixture) => new(true, true, false,
+        fixture.Settings.InstalledExecutablePath, Convert.ToHexString(SHA256.HashData(fixture.Bytes)), "1.7.0");
 
     private static string Tamper(string envelope, bool payload)
     {

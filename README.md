@@ -9,7 +9,8 @@ A portable Windows optimization station for competitive Fortnite players.
 - **Internet Optimizer:** bounded hardware-aware RSS/NIC comparisons, repeated baseline/treatment/baseline measurements and exact restoration.
 - **Guide / BIOS:** hardware-specific advice with primary references; firmware changes remain manual.
 - **Experimental:** optional switches start off.
-- **Updates:** remote signed manifests and an explicit download/restart flow in the same EXE.
+- **Updates:** startup automatically downloads and installs a newer signed release, then reopens the same EXE; game and recovery safeguards remain in force.
+- **Reliable OFF:** cancel activation, stop the guard, restore safe originals now, and keep disruptive recovery available until game exit.
 
 Read [README.txt](README.txt) for use, supported actions and recovery, and
 [VALIDATION.txt](VALIDATION.txt) for observed checks and limits.

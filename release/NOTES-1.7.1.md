@@ -1,0 +1,8 @@
+- **Automatic startup updates:** TMODE now checks, downloads, verifies and installs a newer signed release, then reopens the same executable. Offline checks and failed preparation let the current version continue. Fortnite and active recovery block replacement.
+- **No repeated failing-update loop:** the automatic target version/hash is recorded before helper handoff. A failed target waits for a newer release or a manual retry. Helper relaunches skip startup updating once.
+- **OFF during activation:** stop requests can no longer be erased by pending analysis or a queued start. Cancel start remains accessible while preparation is busy. Stop also interrupts remaining app and priority batches at safe boundaries.
+- **Clear recovery state:** safe priority/toast originals can restore with Fortnite open. NIC reconnects, game-file changes and disruptive recovery remain deferred. The UI distinguishes stopped mode from recovery still pending.
+- **Safer failed-update recovery:** when replacement was never attempted, the helper can reopen the unchanged, identity-verified original after confirmed parent exit. Uncertain replacement retains recovery artifacts.
+- **Final restart authorization:** preparing a helper no longer grants installation. A final synchronous safety/cancellation check grants it immediately before app exit; canceled preparation cannot later turn a user exit into an update restart. Windows shutdown is not blocked by startup updating.
+
+Existing 1.7.0 copies require one confirmed update to obtain this automatic behavior. No live tuning, updater swap, Fortnite benchmark or FPS/latency gain is claimed by this patch's isolated tests.

@@ -1,4 +1,4 @@
-TMODE 1.7.0 — COMPETITIVE OPTIMIZATION STATION
+TMODE 1.7.1 — COMPETITIVE OPTIMIZATION STATION
 
 Windows x64 portable app. The .NET 10 desktop runtime is bundled; no account,
 AI subscription, Native or second PC is needed. Open TMODE.exe from the release,
@@ -82,8 +82,13 @@ security, audio/input, kept/foreground/capture/routing paths remain protected.
 Realtime priority and anti-cheat bypasses are never used. Process-count or FPS
 targets are not guaranteed. Tweak PC itself does not close apps or Native.
 
-Restore changes / Ctrl+Alt+F11 restores the recorded originals. Recovery can
-wait for Fortnite to exit. Exact journals are separate from Windows restore
+Turn off / Ctrl+Alt+F11 latches a stop request during activation as well as
+play. Cancel start stays available during preparation; queued analysis cannot
+turn the mode back on after OFF. An already entered Windows operation finishes
+at its next bounded boundary. Safe priority/toast originals can restore while
+Fortnite remains open. NIC reconnects, INI writes and disruptive workloads wait
+for exit. OFF / RECOVERY means the guard is stopped and originals remain saved.
+Exact journals are separate from Windows restore
 points and preserve conflicting external edits instead of blindly overwriting
 them. Keep %LOCALAPPDATA%\TourneyMode\session.json until recovery completes.
 Tweak/Strip/Internet startup opens recovery rather than silently undoing your
@@ -92,13 +97,19 @@ for the complete active transaction before starting a different workflow.
 Never delete a journal or replace a running EXE to force an upgrade.
 
 UPDATES
-The same EXE checks a remote GitHub release feed while idle. Downloads and
-restart/install require your choice. RSA-signed manifests, HTTPS allowlisted
+On startup the same EXE automatically checks, downloads and installs a newer
+signed GitHub release, then reopens at the same path. Fortnite and active
+optimization/recovery defer the update. Offline or failed checks leave the app
+usable; Updates remains available for manual retry. A durably recorded automatic
+version/hash attempt prevents repeatedly installing the same failing target.
+Helper relaunches skip automatic checking once to avoid nested update loops.
+RSA-signed manifests, HTTPS allowlisted
 redirects, exact version/architecture/size/SHA256 and PE metadata protect the
 download. Apply waits for normal parent exit, refuses game/pending recovery,
 uses atomic replacement and retains a backup with rollback on detected failure.
 An update signature is separate from Windows Authenticode code signing.
-Existing 1.5/1.6 copies need a one-time move to this updater-enabled release.
+Existing 1.5/1.6 copies need this release once. A1.7.0 copy needs one confirmed
+update to acquire automatic installation;1.7.1 and later automate safe startup.
 
 Repository and official downloads:
 https://github.com/koolkatgaming123-collab/TMODE

@@ -75,10 +75,14 @@ public sealed class UpdateProgress
     public double? Percent => TotalBytes is > 0 ? Math.Clamp(100d * BytesReceived / TotalBytes.Value, 0, 100) : null;
 }
 
-public sealed class UpdateLaunchResult
+public sealed class UpdateLaunchResult : IDisposable
 {
+    // Started means the helper is prepared. It cannot apply until its creating
+    // AppUpdater synchronously authorizes this opaque result immediately at exit.
     public bool Started { get; init; }
     public string Message { get; init; } = "";
     public string TicketPath { get; init; } = "";
     public int? HelperProcessId { get; init; }
+    internal AppUpdater.ParentExitAuthorization? Authorization { get; init; }
+    public void Dispose() => Authorization?.Dispose();
 }

@@ -128,6 +128,18 @@ public static class UiPreview
             Save(main, "main-tweak-recovery.png", output, images, checks, renderEvidence);
             main.PrepareSyntheticPreview("Updates", tweakAssessment, pending); LayoutHidden(main);
             Check(checks, "shared recovery blocks update", !Field<Button>(main, "_updateAction").Enabled, "Update installation cannot replace a session controller during recovery.");
+            main.PrepareSyntheticStopPreview(starting: true, working: true, state: null); LayoutHidden(main);
+            Check(checks, "Tourney start can be canceled while preparation is busy", Field<Button>(main, "_undoTop").Enabled && Field<Button>(main, "_toggle").Enabled
+                && Field<Button>(main, "_undoTop").Text == "Cancel start", "Stop stays accessible before a journal exists and while initial analysis is running.");
+            Save(main, "main-cancel-start-minimum.png", output, images, checks, renderEvidence);
+            main.PrepareSyntheticStopPreview(starting: false, working: true, state: new() { Workflow = "Tourney", Phase = "Active" }); LayoutHidden(main);
+            Check(checks, "Active Tourney has a usable stop action during busy work", Field<Button>(main, "_undoTop").Enabled && Field<Button>(main, "_toggle").Enabled,
+                "Busy preparation does not disable both OFF paths.");
+            main.PrepareSyntheticStopPreview(starting: false, working: false, state: new() { Workflow = "Tourney", Phase = "Restore deferred" }); LayoutHidden(main);
+            Check(checks, "Stopped Tourney is distinct from pending recovery", Field<Label>(main, "_sessionBadge").Text == "OFF / RECOVERY" && Field<Button>(main, "_undoTop").Enabled,
+                "A durable journal awaiting unsafe restoration is not displayed as Tourney ON.");
+            Save(main, "main-stopped-recovery-minimum.png", output, images, checks, renderEvidence);
+            main.PrepareSyntheticStopPreview(starting: false, working: false, state: null);
             Check(checks, "main preview never constructs updater", Field<AppUpdater?>(main, "_updater") == null && !Field<bool>(main, "_startupUpdateCheckStarted"),
                 "The engine-free preview never invokes Shown, startup checks or update operations.");
             Check(checks, "main preview never shown", !shown && !main.Visible, "Hidden controls and synthetic data only.");

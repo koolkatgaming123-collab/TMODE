@@ -23,7 +23,9 @@ public sealed partial class MainForm
     private bool _sessionOptionsExpanded;
     private SessionState? VisibleSession => _preview ? _previewSession : _engine.State;
     private bool VisibleSessionActive => VisibleSession != null;
-    private bool UiBusy => _busy || (!_preview && _engine.InternetBusy);
+    private bool VisibleTourneyStopped => string.Equals(VisibleSession?.Workflow, "Tourney", StringComparison.Ordinal)
+        && (_preview ? VisibleSession?.Phase is "Restore deferred" or "Needs recovery" : _engine.StopRequested);
+    private bool UiBusy => _busy || _updateInProgress || (!_preview && _engine.InternetBusy);
 
     private void BuildNavigationShell()
     {
@@ -207,7 +209,7 @@ public sealed partial class MainForm
             "Guide / BIOS" => "Hardware-specific guidance, manual steps and official sources.",
             "Apps" => "Your Tourney selections and always-keep protections.",
             "Activity" => "Recorded outcomes and the details behind every operation.",
-            "Updates" => "Verified releases, downloaded only when you choose.",
+            "Updates" => "Signed releases update automatically at safe startup.",
             _ => "A clear view of your next performance session."
         };
     }
@@ -239,12 +241,14 @@ public sealed partial class MainForm
         bool tweak = string.Equals(state?.Workflow, "Tweak", StringComparison.Ordinal);
         bool strip = string.Equals(state?.Workflow, "Strip", StringComparison.Ordinal);
         bool internet = string.Equals(state?.Workflow, "Internet", StringComparison.Ordinal);
-        _sessionBadge.Text = UiBusy ? "WORKING" : recovery ? "RECOVERY" : active ? internet ? state?.InternetCalibration?.Restored == true ? "NET READY" : "NET ACTIVE" : strip ? "STRIP ACTIVE" : tweak ? "TWEAKS ACTIVE" : "TOURNEY ON" : "READY";
+        bool stopped = VisibleTourneyStopped;
+        _sessionBadge.Text = stopped ? "OFF / RECOVERY" : UiBusy ? "WORKING" : recovery ? "RECOVERY" : active ? internet ? state?.InternetCalibration?.Restored == true ? "NET READY" : "NET ACTIVE" : strip ? "STRIP ACTIVE" : tweak ? "TWEAKS ACTIVE" : "TOURNEY ON" : "READY";
         _sessionBadge.ForeColor = recovery ? UiTheme.Amber : UiTheme.Cyan;
-        _sessionMetric.Text = recovery ? "Recovery pending" : active ? internet ? state?.InternetCalibration?.Restored == true ? "Original NIC restored" : "NIC changes active" : strip ? "Features stripped" : tweak ? "Tweaks active" : "Tourney active" : "No active session";
+        _sessionMetric.Text = stopped ? "Stopped / recovery pending" : recovery ? "Recovery pending" : active ? internet ? state?.InternetCalibration?.Restored == true ? "Original NIC restored" : "NIC changes active" : strip ? "Features stripped" : tweak ? "Tweaks active" : "Tourney active" : "No active session";
         _goalMetric.Text = internet ? "Internet tune" : strip ? "Optional features" : PlannerDialog.GoalName(state?.Options.Intent.Goal ?? _preferences.Intent.Goal);
         _protectionMetric.Text = "Discord kept";
-        _undoTop.Enabled = !UiBusy && active;
+        _undoTop.Text = _startingTourney ? "Cancel start" : stopped ? "Retry recovery" : active ? "Stop / restore" : "Undo session";
+        _undoTop.Enabled = (active || _startingTourney || (!_preview && _engine.ActivationBusy)) && !_updateInProgress && !_reviewDialogOpen;
         _featureList.BeginUpdate(); _featureList.Items.Clear();
         foreach (var result in state?.Features ?? _lastTweakResults)
         {

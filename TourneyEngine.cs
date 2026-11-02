@@ -264,6 +264,8 @@ public sealed class TourneyEngine
     private readonly HashSet<string> deniedPriorities = [];
     private readonly HashSet<string> watchedAttempts = [];
     private volatile bool restoreRequested;
+    private readonly object restoreRequestSync = new();
+    private int activationOperations;
     private int internetOperationClaimed;
     private long restoreGeneration;
     public bool InternetBusy => Volatile.Read(ref internetOperationClaimed) != 0;
@@ -273,11 +275,16 @@ public sealed class TourneyEngine
     private string StatePath => Path.Combine(DataDirectory, "session.json");
     public SessionState? State { get; private set; }
     public bool IsActive => State is not null;
+    // IsActive preserves the recovery-journal contract. Stopping the guard and
+    // completing potentially disruptive recovery are distinct states.
+    public bool StopRequested => restoreRequested;
+    public bool IsModeRunning => State?.Phase == "Active" && !restoreRequested;
+    public bool ActivationBusy => Volatile.Read(ref activationOperations) != 0;
     public bool GameClientRunning => system.GetGamePresence() != GamePresence.Absent;
     private bool GameDefinitelyAbsent() => system.GetGamePresence() == GamePresence.Absent;
     public bool RecoveryDeferredUntilGameExit => State?.Phase == "Restore deferred";
     public bool CanStartStrip => State is null || State is { Workflow: "Tweak", Phase: "Active", RestorePoint.Verified: true }
-        && (State.Strip is null || State.Strip.FullyRestored);
+        && !restoreRequested && (State.Strip is null || State.Strip.FullyRestored);
     private readonly Func<AppOptions, Task<PcAnalysis>> analysis;
     public Task<PcAnalysis> CaptureAnalysisAsync(AppOptions options) => analysis(PerformancePlanner.Copy(options));
     public async Task<OptimizationPlan> AnalyzePlanAsync(AppOptions options)
@@ -311,6 +318,7 @@ public sealed class TourneyEngine
             // A newly opened controller must never resume app closure from a prior
             // controller's journal. Only recovery may proceed after an interruption.
             if (State.Phase is "Starting" or "Active" or "Restoring") State.Phase = "Needs recovery";
+            restoreRequested = true;
             this.system.ConfigureProtection(State.Options.ProtectedAppPaths);
         }
     }
@@ -344,9 +352,22 @@ public sealed class TourneyEngine
     }
     public void RequestRestore()
     {
-        Interlocked.Increment(ref restoreGeneration);
-        restoreRequested = true;
+        lock (restoreRequestSync)
+        {
+            restoreRequested = true;
+            Interlocked.Increment(ref restoreGeneration);
+        }
         try { internetCancellation?.Cancel(); } catch (ObjectDisposedException) { }
+    }
+
+    private void ArmOperation(long expectedRestoreGeneration)
+    {
+        lock (restoreRequestSync)
+        {
+            if (Volatile.Read(ref restoreGeneration) != expectedRestoreGeneration)
+                throw new OperationCanceledException("A stop request superseded this queued or pending activation.");
+            restoreRequested = false;
+        }
     }
 
     private void NetworkOutsideGameGate()
@@ -387,7 +408,7 @@ public sealed class TourneyEngine
         {
             await gate.WaitAsync(cancellation.Token); entered = true;
             if (Volatile.Read(ref restoreGeneration) != initialRestoreGeneration) throw new OperationCanceledException("A restore request superseded this queued network test.");
-            restoreRequested = false;
+            ArmOperation(initialRestoreGeneration);
             return await Task.Run(async () =>
             {
                 progress?.Report(new() { Phase = "Safety checkpoint", Message = "Verifying a Windows restore point before any NIC trial.", Completed = 0, Total = 1 });
@@ -423,7 +444,7 @@ public sealed class TourneyEngine
         {
             await gate.WaitAsync(cancellation.Token); entered = true;
             if (Volatile.Read(ref restoreGeneration) != initialRestoreGeneration) throw new OperationCanceledException("A restore request superseded this queued network apply.");
-            restoreRequested = false;
+            ArmOperation(initialRestoreGeneration);
             await Task.Run(async () =>
             {
                 PrepareInternetSession(); cancellation.Token.ThrowIfCancellationRequested();
@@ -478,6 +499,7 @@ public sealed class TourneyEngine
 
     public async Task EnableStripAsync(StripBackup reviewed, CancellationToken token = default, IProgress<TweakProgress>? progress = null)
     {
+        long initialRestoreGeneration = Volatile.Read(ref restoreGeneration);
         await gate.WaitAsync(token);
         try
         {
@@ -485,6 +507,7 @@ public sealed class TourneyEngine
             if (DateTime.UtcNow - reviewed.CapturedUtc > TimeSpan.FromMinutes(10) || reviewed.CapturedUtc > DateTime.UtcNow.AddMinutes(1))
                 throw new InvalidOperationException("The reviewed Windows feature snapshot expired. Review the selection again.");
             if (reviewed.ApplyAttempted) throw new InvalidOperationException("This feature snapshot was already used.");
+            ArmOperation(initialRestoreGeneration);
             // Copy the exact reviewed originals. WindowsStrip.Apply verifies them again
             // rather than silently recapturing newly changed services after consent.
             var backup = JsonSerializer.Deserialize<StripBackup>(JsonSerializer.Serialize(reviewed, Json), Json) ?? throw new InvalidDataException("Empty strip review.");
@@ -501,10 +524,13 @@ public sealed class TourneyEngine
             if (State.RestorePoint is not { Verified: true, SequenceNumber: > 0 } point || !system.VerifyRestorePoint(point))
                 throw new InvalidOperationException("The Windows restore point cannot be verified. No stripping is allowed; restore this session and enable System Protection before retrying.");
             token.ThrowIfCancellationRequested();
+            if (restoreRequested || Volatile.Read(ref restoreGeneration) != initialRestoreGeneration) throw new OperationCanceledException("Stop requested before Windows feature changes.");
             if (!GameDefinitelyAbsent()) throw new InvalidOperationException("Fortnite started. No Windows features were stripped.");
             State.Strip = backup; State.Phase = "Applying Windows feature profile"; Save();
             progress?.Report(new() { Stage = "Applying selected groups", Detail = "Original service settings are saved before every change.", Percent = 50 });
             system.ApplyStrip(backup, Save, Say, token);
+            token.ThrowIfCancellationRequested();
+            if (restoreRequested || Volatile.Read(ref restoreGeneration) != initialRestoreGeneration) throw new OperationCanceledException("Stop requested; recorded Windows feature changes need recovery.");
             State.Phase = "Active";
             Feature("strip", "Optional Windows features", backup.HasChanges ? FeatureState.Applied : FeatureState.Skipped,
                 "Only the reviewed groups were attempted. Use per-feature Repair to restore them. See group statuses for skips/rollback.");
@@ -536,7 +562,7 @@ public sealed class TourneyEngine
         if (finishSession) await RestoreAsync();
     }
 
-    public Task EnableAsync(AppOptions options) => EnableCoreAsync(options, "Tourney");
+    public Task EnableAsync(AppOptions options, CancellationToken token = default) => EnableCoreAsync(options, "Tourney", token);
     public Task EnableTweakAsync(AppOptions options, CancellationToken token = default, IProgress<TweakProgress>? progress = null)
     {
         // A tweak session can never inherit app/Native/service/network shutdown.
@@ -547,14 +573,22 @@ public sealed class TourneyEngine
     }
     private async Task EnableCoreAsync(AppOptions options, string workflow, CancellationToken token = default, IProgress<TweakProgress>? progress = null)
     {
-        await gate.WaitAsync(token);
+        long initialRestoreGeneration = Volatile.Read(ref restoreGeneration);
+        Interlocked.Increment(ref activationOperations);
+        bool entered = false;
+        SessionState? ownedState = null;
         try
         {
+            await gate.WaitAsync(token); entered = true;
             void TweakBoundary()
             {
                 token.ThrowIfCancellationRequested();
+                if (restoreRequested || Volatile.Read(ref restoreGeneration) != initialRestoreGeneration)
+                    throw new OperationCanceledException("Turn OFF requested; further activation and app shutdown stopped.");
                 if (workflow == "Tweak" && !GameDefinitelyAbsent()) throw new InvalidOperationException("Fortnite started or its absence is unknown. Applying stopped; recorded changes can be restored.");
             }
+            if (Volatile.Read(ref restoreGeneration) != initialRestoreGeneration)
+                throw new OperationCanceledException("A stop request superseded this queued activation.");
             if (State is not null) throw new InvalidOperationException("Restore the existing session before enabling again.");
             if (workflow == "Tweak" && !GameDefinitelyAbsent()) throw new InvalidOperationException("Close Fortnite before applying Tweak changes.");
             options = PerformancePlanner.Copy(options);
@@ -567,6 +601,9 @@ public sealed class TourneyEngine
             {
                 if (string.IsNullOrWhiteSpace(options.ReviewedPlanFingerprint)) throw new InvalidOperationException("Analyze this PC, review the goal-based plan and choose Use this plan before turning ON.");
                 reviewedPlan = await AnalyzePlanAsync(options);
+                token.ThrowIfCancellationRequested();
+                if (Volatile.Read(ref restoreGeneration) != initialRestoreGeneration)
+                    throw new OperationCanceledException("A stop request superseded the pending plan analysis.");
                 bool Planned(string id) => reviewedPlan.Actions.Any(a => a.Id == id && a.Disposition == PlanDisposition.Recommended);
                 if (options.HighPerformancePower != Planned("power") || options.TuneEthernet != Planned("ethernet")
                     || options.PrioritizeNetwork != Planned("qos"))
@@ -575,7 +612,7 @@ public sealed class TourneyEngine
                     throw new InvalidOperationException("Hardware, power, game state or plan choices changed. Analyze this PC and review a fresh plan before turning ON.");
                 options = PerformancePlanner.Apply(reviewedPlan, options);
             }
-            restoreRequested = false;
+            ArmOperation(initialRestoreGeneration);
             TweakBoundary();
             watchedAttempts.Clear();
             deniedPriorities.Clear();
@@ -584,12 +621,15 @@ public sealed class TourneyEngine
             var eligibleApps = Scan(options.FortniteOnly, options.MaximumHeadroom, options.ProtectedAppPaths);
             var apps = eligibleApps.Where(a => options.SelectedApps.Contains(a.Id, StringComparer.OrdinalIgnoreCase) && !options.ExcludedApps.Contains(a.Id, StringComparer.OrdinalIgnoreCase)
                 && !PerformancePlanner.ShouldPreserveApp(a, options)).ToList();
+            TweakBoundary();
             using var owner = Process.GetCurrentProcess();
             State = new SessionState { Workflow = workflow, Options = options, Apps = apps.Select(a => new RestoreApp { App = a }).ToList(), Plan = reviewedPlan,
                 CreatedByVersion = typeof(TourneyEngine).Assembly.GetName().Version?.ToString() ?? "1.5.0",
                 Controller = new ProcessIdentity { Id = owner.Id, StartTicks = owner.StartTime.ToUniversalTime().Ticks, SessionId = owner.SessionId,
                     Path = Environment.ProcessPath ?? "", Name = owner.ProcessName + ".exe" } };
+            ownedState = State;
             Save(); // From this point a crash is always recoverable by reopening the app.
+            TweakBoundary();
             system.SetRecoveryStartup(true, workflow);
             if (workflow == "Tweak" || options.ApplyWindowsProfile)
             {
@@ -634,11 +674,13 @@ public sealed class TourneyEngine
             else Feature("fortnite-settings", "Fortnite FPS / latency settings", FeatureState.Skipped, "Current Fortnite settings preserved.");
             if (options.Intent.Fps.BackgroundAppPaths.Count > 0)
             {
+                TweakBoundary();
                 if (!GameDefinitelyAbsent()) Feature("background-priority", "Background CPU governor", FeatureState.Deferred, "Prepare approved background priorities before starting Fortnite.");
                 else
                 {
                     var closingPaths = apps.SelectMany(a => a.Processes.Select(p => p.Path).Append(a.LaunchPath)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                     State.BackgroundPriorities = system.CaptureBackgroundPriorities(eligibleApps.Where(a => !apps.Contains(a)).ToList(), options.Intent.Fps.BackgroundAppPaths, closingPaths); Save();
+                    TweakBoundary();
                     system.ApplyBackgroundPriorities(State.BackgroundPriorities, Save, Say);
                     bool adjusted = State.BackgroundPriorities.Any(item => item.Applied);
                     Feature("background-priority", "Background CPU governor", adjusted ? FeatureState.Applied : FeatureState.Skipped,
@@ -647,16 +689,19 @@ public sealed class TourneyEngine
             }
             if (options.SilenceNotifications)
             {
+                TweakBoundary();
                 Feature("notifications", "Notifications", FeatureState.Pending, "Recording originals before suppression.");
                 State.OriginalDoNotDisturb = GameClientRunning ? null : system.GetDnd();
                 State.Notifications = system.CaptureNotifications();
                 Save();
+                TweakBoundary();
                 if (State.OriginalDoNotDisturb is bool original)
                 {
                     if (!original) system.SetDnd(true);
                     Say("Windows Do Not Disturb is ON (verified).");
                 }
                 else Say("Windows Do Not Disturb toggle could not be read; full DND is unverified.");
+                TweakBoundary();
                 system.SuppressNotifications();
                 Feature("notifications", "Notifications", FeatureState.Applied, State.OriginalDoNotDisturb.HasValue
                     ? "Toast suppression and verified shell DND; exact originals saved."
@@ -830,12 +875,16 @@ public sealed class TourneyEngine
                     : "The reviewed returning-app guard remains active during play.");
             if (options.CloseCodex)
             {
+                TweakBoundary();
                 State.Codex = system.CaptureCodex(options.ProtectedAppPaths); Save();
+                TweakBoundary();
                 await system.StopCodex(State.Codex, options.ForceClose, Save, Say);
+                TweakBoundary();
                 bool stopped = State.Codex.NativeStopAttempted || State.Codex.Launchers.Any(item => item.StopAttempted);
                 Feature("codex", "Codex lifecycle", stopped ? FeatureState.Applied : FeatureState.Skipped,
                     stopped ? "Supported owners stopped through recorded lifecycle controls; skips remain in the activity log." : "No supported eligible owner required shutdown; kept/unsupported tools remain running.");
             }
+            TweakBoundary();
             State.Phase = "Active";
             State.LastHeartbeatUtc = system.UtcNow;
             if (options.AutoRestoreOnGameExit)
@@ -844,6 +893,7 @@ public sealed class TourneyEngine
                 Say("Auto restore armed: waits for Fortnite to run, then restores settings 15 seconds after the client exits.");
             }
             Save();
+            TweakBoundary();
             Say(workflow == "Tweak" ? "Tweak changes active. Selected supported settings were requested; applications and Native remain running. Restore changes returns recorded originals."
                 : options.MaximumHeadroom ? "Maximum headroom ON. Reviewed background executables closed; optional tasks held. Windows, security, game dependencies and devices protected."
                 : options.FortniteOnly ? "Fortnite-only profile ON. Selected supported apps closed; essential and unknown components protected." : "Tourney Mode ON. Protected services and unknown apps remain running.");
@@ -855,10 +905,10 @@ public sealed class TourneyEngine
         catch (Exception e)
         {
             Say("Activation interrupted: " + e.Message + " Use Turn OFF / Restore.");
-            if (State is not null) { State.Phase = "Needs recovery"; Save(); }
+            if (ownedState is not null && ReferenceEquals(State, ownedState)) { State!.Phase = "Needs recovery"; Save(); }
             throw;
         }
-        finally { gate.Release(); }
+        finally { if (entered) gate.Release(); Interlocked.Decrement(ref activationOperations); }
     }
 
     private async Task CloseApp(RestoreApp item, bool force)
@@ -871,6 +921,7 @@ public sealed class TourneyEngine
         Save(); // Before WM_CLOSE as well as before force termination.
         foreach (var p in targets)
         {
+            if (restoreRequested) return;
             try { system.CloseWindow(p); }
             catch (Exception e) { Say(item.App.Name + ": graceful close: " + e.Message); }
         }
@@ -880,11 +931,13 @@ public sealed class TourneyEngine
             // Parent first: a Native supervisor must not recreate children after they are killed.
             foreach (var p in ParentFirst(targets))
             {
+                if (restoreRequested) return;
                 if (!system.Alive(p)) continue;
                 try { if (system.CanTouch(p)) system.Terminate(p); }
                 catch (Exception e) { Say(item.App.Name + ": kept PID " + p.Id + ": " + e.Message); }
             }
         }
+        if (restoreRequested) return;
         await system.Delay(300);
         int remaining = targets.Count(system.Alive);
         Say(item.App.Name + $": closed {targets.Count - remaining}/{targets.Count} recorded processes" + (remaining > 0 ? "; some remained open." : "."));
@@ -940,6 +993,7 @@ public sealed class TourneyEngine
         if (games.Count == 0) Feature("priority", "Fortnite priority", FeatureState.Deferred, "Waiting for the Fortnite client; no other process is prioritized.");
         foreach (var p in games)
         {
+            if (restoreRequested) return;
             string identity = p.Id + ":" + p.StartTicks;
             if (deniedPriorities.Contains(identity)) continue;
             var prior = State.Priorities.FirstOrDefault(b => b.Process.Id == p.Id && b.Process.StartTicks == p.StartTicks);
@@ -952,7 +1006,7 @@ public sealed class TourneyEngine
                     Save();
                 }
                 if (system.GetPriority(p) != requested)
-                { system.SetPriority(p, requested); Say("Fortnite CPU priority set to " + (ProcessPriorityClass)requested + "."); }
+                { if (restoreRequested) return; system.SetPriority(p, requested); Say("Fortnite CPU priority set to " + (ProcessPriorityClass)requested + "."); }
                 Feature("priority", "Fortnite priority", FeatureState.Applied, "Windows accepted " + (ProcessPriorityClass)requested + " for the current client; performance benefit is unmeasured.");
             }
             catch (Exception e)
@@ -1095,15 +1149,9 @@ public sealed class TourneyEngine
         try
         {
             if (State is null) return;
-            if (State.Options.OptionsVersion >= 9 && State.Options.Intent.Fps.QuietDuringGame && !GameDefinitelyAbsent())
-            {
-                State.Phase = "Restore deferred";
-                Feature("quiet-match", "Quiet match operation", FeatureState.Deferred, "Guard disarmed. Settings and background workloads will restore after Fortnite exits.");
-                Save();
-                return;
-            }
             State.Phase = "Restoring";
             Save();
+            Feature("quiet-match", "Quiet match operation", FeatureState.Recovered, "Mode and returning-app guard are stopped. Safe originals restore now; disruptive recovery can wait for game exit.");
             var errors = new List<string>();
             bool deferred = false;
             bool WaitForGameExit(string id, string name)
